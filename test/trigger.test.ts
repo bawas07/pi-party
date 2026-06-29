@@ -134,14 +134,14 @@ describe("evaluateAll", () => {
     const result = evaluateAll(ctx("build a login system"));
     expect(result.noPlanIntent).toBe(false);
     expect(result.implementIntent).toBe("high");
-    expect(result.needsScout).toBe(true);
+    expect(result.needsScout).toBe(false); // no explicit codebase question
   });
 
   it("no-plan overrides implement-intent to low (task 3.18)", () => {
     const result = evaluateAll(ctx("build a login system, no need to plan"));
     expect(result.noPlanIntent).toBe(true);
     expect(result.implementIntent).toBe("low"); // not evaluated, defaults to low
-    expect(result.needsScout).toBe(true); // still fires independently
+    expect(result.needsScout).toBe(false); // still fires independently but no codebase question here
   });
 
   it("Q&A returns low intent without scout need", () => {
