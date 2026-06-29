@@ -59,7 +59,7 @@ export function noPlanIntent(ctx: TurnContext): boolean {
 
 const HIGH_INTENT_PATTERNS = [
   /\b(build|create|implement|develop)\b.+\b(feature|system|module|api|endpoint|service|component|page|route)\b/i,
-  /\b(add|write|code) (a |the |some )?(feature|function|method|class|module|test|endpoint)\b/i,
+  /\b(add|write|code) (a |the |some )?.*\b(feature|function|method|class|module|test|endpoint)\b/i,
   /\brefactor\b.+\b(to|use|into|with)\b/i,
   /\bmigrate\b.+\b(from|to)\b/i,
   /\b(set up|scaffold|bootstrap|initialize)\b/i,
@@ -76,7 +76,6 @@ const MEDIUM_INTENT_PATTERNS = [
   /\bcan (you|we) help (me )?(figure out|understand|decide)\b/i,
   /\b(do you think|what about|how about)\b/i,
   /\b(recommend|suggest)\b.+\b(approach|way|method|library|tool|pattern)\b/i,
-  /\?$/m, // ends with question mark (but check for implementation-adjacent keywords)
 ];
 
 /**
@@ -85,8 +84,22 @@ const MEDIUM_INTENT_PATTERNS = [
  */
 export function implementIntent(ctx: TurnContext): "high" | "medium" | "low" {
   const msg = ctx.userMessage;
+  const isQuestion = msg.trim().endsWith("?");
 
-  // Check high-intent patterns first
+  // Check medium-intent patterns first — questions about implementation are medium,
+  // not high, even if they contain implementation verbs.
+  for (const pattern of MEDIUM_INTENT_PATTERNS) {
+    if (pattern.test(msg)) {
+      return "medium";
+    }
+  }
+
+  // Questions with implementation verbs → medium
+  if (isQuestion && /\b(implement|build|code|refactor|add|change|fix|migrate|create)\b/i.test(msg)) {
+    return "medium";
+  }
+
+  // Check high-intent patterns
   for (const pattern of HIGH_INTENT_PATTERNS) {
     if (pattern.test(msg)) return "high";
   }
@@ -96,28 +109,13 @@ export function implementIntent(ctx: TurnContext): "high" | "medium" | "low" {
     return "high";
   }
 
-  // Medium: questions about implementation
-  for (const pattern of MEDIUM_INTENT_PATTERNS) {
-    if (pattern.test(msg)) {
-      // If it's a question with implementation-adjacent keywords, it's medium
-      if (/\b(build|create|implement|code|refactor|migrate|add|change|update|fix)\b/i.test(msg)) {
-        return "medium";
-      }
-    }
-  }
-
-  // Questions with implementation verbs but no explicit "how would I" pattern
-  if (msg.trim().endsWith("?") && /\b(implement|build|code|refactor|add|change|fix)\b/i.test(msg)) {
-    return "medium";
-  }
-
   return "low";
 }
 
 // ---- needsScout ----
 
 const SCOUT_POSITIVE_PATTERNS = [
-  /\b(find|locate|search for|look for)\b.+\b(file|code|function|class|module|definition|implementation|pattern)\b/i,
+  /\b(find|locate|search for|look for)\b.+\b(file|code|function|class|module|definition|implementation|pattern|codebase)\b/i,
   /\bwhere (is|are)\b.+\b(defined|located|implemented|used|referenced|called)\b/i,
   /\bwhich (file|module|package)\b.+\b(contains|has|defines|exports)\b/i,
   /\bexplore\b.+\b(codebase|code|project|structure|architecture)\b/i,

@@ -160,6 +160,18 @@ export class Orchestrator {
   // ========================================================================
 
   /**
+   * Whether a pipeline is currently active (any phase except idle/complete).
+   */
+  isActive(): boolean {
+    return this.currentTask !== null && this.currentTask.phase !== "complete";
+  }
+
+  /** Whether the current pipeline task has an approved plan. */
+  hasApprovedPlan(): boolean {
+    return this.currentTask?.approved === true;
+  }
+
+  /**
    * Start the pipeline. Aborts any active pipeline first.
    *
    * Non-blocking: all agent dispatch uses `isBackground: true`.
