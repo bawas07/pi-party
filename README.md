@@ -1,6 +1,6 @@
-# @tintinweb/pi-subagents
+# pi-party
 
-A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Run them in foreground or background, steer them mid-run, resume completed sessions, and define your own custom agent types.
+A [pi](https://pi.dev) extension for structured **Scout → Plan → Crafter → Gatekeeper** pipeline orchestration. Forked from `@tintinweb/pi-subagents` v0.12.0 — keeps the subagent infrastructure (background execution, live widget, mid-run steering, worktree isolation) and adds ambient intent detection, a planning gate, event-driven pipeline execution, concurrent Crafters, and a Gatekeeper fix loop.
 
 <img width="600" alt="pi-subagents screenshot" src="https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png" />
 
@@ -10,6 +10,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 ## Features
 
+- **Pipeline orchestration** — structured Scout → Plan → Crafter → Gatekeeper pipeline for implementation tasks. Triggered automatically via ambient intent detection or manually via `/summoner <task>` / `/pipeline <task>`.
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4) and smart group join (consolidated notifications)
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons
@@ -38,7 +39,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 ## Install
 
 ```bash
-pi install npm:@tintinweb/pi-subagents
+pi install npm:pi-party
 ```
 
 Or load directly for development:
@@ -59,40 +60,6 @@ Agent({
   run_in_background: true,
 })
 ```
-
-Foreground agents block until complete and return results inline. Background agents return an ID immediately and notify you on completion.
-
-### Scheduling
-
-Add a `schedule` field to register the agent to fire later instead of running now:
-
-```
-Agent({
-  subagent_type: "Scout",
-  prompt: "Look at recent commits and summarize what changed since last week",
-  description: "Weekly commit review",
-  schedule: "0 0 9 * * 1",   // 9am every Monday (6-field cron)
-})
-```
-
-Schedule formats:
-
-- **Cron** — 6-field (`second minute hour day-of-month month day-of-week`), e.g. `"0 0 9 * * 1"` for 9am every Monday, `"0 */15 * * * *"` for every 15 minutes.
-- **Interval** — `"5m"`, `"1h"`, `"30s"`, `"2d"`. Fires repeatedly at that interval.
-- **One-shot relative** — `"+10m"`, `"+2h"`, `"+1d"`. Fires once at that future time.
-- **One-shot absolute** — full ISO timestamp, e.g. `"2026-12-25T09:00:00.000Z"`.
-
-When a schedule fires, the spawn runs in background and its completion notification arrives in the conversation through the same `subagent-notification` followUp path as a manually-spawned background agent — your parent agent reasons about the result the same way.
-
-Schedules are **session-scoped**: they reset on `/new` and restore on `/resume`. List and cancel via `/agents → Scheduled jobs` (creation is the `Agent` tool's job — there is no parallel manual-create wizard). Storage at `<cwd>/.pi/subagent-schedules/<sessionId>.json` with PID-based file locking for cross-instance safety.
-
-**Disable the feature entirely**: `/agents → Settings → Scheduling → disabled` removes `schedule` from the `Agent` tool spec (no LLM-context cost), hides the menu entry, and stops any active scheduler. The schema-level removal takes effect on the next pi session; the runtime kill is immediate. Re-enable from the same menu.
-
-Restrictions:
-- `schedule` cannot be combined with `inherit_context` (no parent conversation exists at fire time) or `resume` (schedules create fresh agents).
-- `run_in_background` is forced to `true`.
-- Scheduled fires bypass the `maxConcurrent` queue so a 5-minute interval cannot be deferred behind long-running manual agents.
-- **Headless `pi -p` doesn't wait for scheduled subagents.**
 
 ## UI
 
@@ -369,29 +336,9 @@ When background agents complete, they notify the main agent. The **join mode** c
 **Configuration:**
 - Configure join mode in `/agents` → Settings → Join mode
 
-## Model Scope
-
-**Opt-in:** off by default. Enable via `/agents → Settings → Scope models`.
-
-When on, each subagent spawn's effective model is validated against pi's own `enabledModels` list (configured via pi's `/scoped-models` UI). pi-subagents reads that list; it doesn't manage it. Both of pi's settings files are honored: global `~/.pi/agent/settings.json` and project-local `<cwd>/.pi/settings.json`. **Project overrides global** — mirrors pi's `SettingsManager` deep-merge, so a tighter per-project scope (hand-edited into the project settings) is respected.
-
-**Out-of-scope handling depends on source:**
-
-| Model source | Out-of-scope behavior |
-|---|---|
-| Caller-supplied via `Agent({ model: "..." })` | Hard error returned to the orchestrator, listing allowed models |
-| Pinned in agent frontmatter | Warning toast + the pinned model runs (frontmatter is authoritative) |
-| Parent-inherited (neither set) | Warning toast + parent's model runs |
-
-**Design:** `scopeModels` is a guardrail against the orchestrator picking unexpected models at runtime, not a hard policy against user-level config. The "frontmatter is authoritative" guarantee from v0.5.1 still holds for `model:` — caller params can't override frontmatter, and frontmatter pins run even when out of scope (with a visible warning).
-
-**Pattern format:** only exact `provider/modelId` entries are honored (e.g. `anthropic/claude-haiku-4-5-20251001`). Glob patterns (`*sonnet*`), bare model IDs, and `:thinking` suffixes — which pi itself supports — are silently dropped here. pi's `/scoped-models` picker writes exact entries, so the limitation is invisible if you configure scope through the UI. Hand-edited globs produce an empty allowed set (scope check becomes a no-op).
-
-**No-op safety:** if `enabledModels` is missing or empty in pi's settings, scope check skips entirely — no false positives, no spurious errors.
-
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, tool description full/compact/custom) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, default join mode, disable defaults on/off, tool description full/compact/custom) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
@@ -411,7 +358,7 @@ Launch an autonomous agent. Available types:
 Custom agents live in .pi/agents/ or {{agentDir}}/agents/.
 ```
 
-Placeholders: `{{typeList}}` (full per-agent descriptions), `{{compactTypeList}}` (first sentence each), `{{agentDir}}`, `{{scheduleGuideline}}` (expands with its own leading newline + `- ` bullet when scheduling is on — place it directly after your last rule line; empty when scheduling is off). Unknown placeholders are left verbatim with a stderr warning; a missing or empty file falls back to `"full"` with a warning. Note the usual trust umbrella: a project-level file shapes the orchestrator's prompt, same as project agents and extensions do.
+Placeholders: `{{typeList}}` (full per-agent descriptions), `{{compactTypeList}}` (first sentence each), `{{agentDir}}`. Unknown placeholders are left verbatim with a stderr warning; a missing or empty file falls back to `"full"` with a warning. Note the usual trust umbrella: a project-level file shapes the orchestrator's prompt, same as project agents and extensions do.
 
 **Starting point:** copy [`examples/agent-tool-description.md`](examples/agent-tool-description.md) — it reproduces the default full description exactly (a CI test keeps it in sync), so you can trim from a known-good baseline instead of writing from scratch.
 
@@ -443,8 +390,6 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:failed` | Agent errored, stopped, or aborted (background and foreground) | same as completed + `error`, `status` |
 | `subagents:steered` | Steering message sent | `id`, `message` |
 | `subagents:compacted` | Agent's session successfully compacted | `id`, `type`, `description`, `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
-| `subagents:scheduled` | Schedule lifecycle change | `{ type: "added" \| "removed" \| "updated" \| "fired" \| "error", … }` (job/agentId/error fields per type) |
-| `subagents:scheduler_ready` | Scheduler bound to session, enabled jobs armed | `sessionId`, `jobCount` |
 | `subagents:ready` | Extension loaded and RPC handlers registered | — |
 | `subagents:settings_loaded` | Persisted settings applied at extension init | `settings` (merged global + project) |
 | `subagents:settings_changed` | `/agents` → Settings mutation was applied | `settings`, `persisted` (`boolean` — `false` on write failure) |
@@ -605,12 +550,17 @@ This is useful for creating agents that inherit extension tools but should not h
 
 ```
 src/
-  index.ts            # Extension entry: tool/command registration, rendering
+  index.ts            # Extension entry: tool/command registration, ambient hook, pipeline trigger
   types.ts            # Type definitions (AgentConfig, AgentRecord, etc.)
-  default-agents.ts   # Embedded default agent configs (general-purpose, Scout, Plan, Crafter, Gatekeeper)
+  default-agents.ts   # Embedded default agent configs (Scout, Plan, Crafter, Gatekeeper, general-purpose)
   agent-types.ts      # Unified agent registry (defaults + user), tool name resolution
   agent-runner.ts     # Session creation, execution, graceful max_turns, steer/resume
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
+  orchestrator.ts     # Event-driven pipeline orchestrator (Scout → Plan → Crafter → Gatekeeper)
+  trigger.ts          # Ambient intent detection hook (needsScout, implementIntent, noPlanIntent)
+  planning-gate.ts    # Structural gate — blocks write-capable spawns without approved plan
+  plan-file.ts        # Plan file operations (write, read, check off, archive, dependency parsing)
+  ledger.ts           # File-level conflict tracking for concurrent Crafter dispatch
   cross-extension-rpc.ts # RPC handlers for cross-extension spawn/ping via pi.events
   group-join.ts       # Group join manager: batched completion notifications with timeout
   custom-agents.ts    # Load user-defined agents from .pi/agents/*.md
@@ -621,9 +571,16 @@ src/
   prompts.ts          # Config-driven system prompt builder
   context.ts          # Parent conversation context for inherit_context
   env.ts              # Environment detection (git, platform)
+  usage.ts            # Token usage tracking and context-window utilization
+  settings.ts         # Persistent settings (merge global + project)
+  model-resolver.ts   # Model resolution (provider/modelId, fuzzy names)
+  invocation-config.ts# Resolves agent invocation config (frontmatter + params)
+  status-note.ts      # Non-normal outcome status notes (stopped, aborted, steered)
   ui/
     agent-widget.ts       # Persistent widget: spinners, activity, status icons, theming
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
+    fleet-list.ts         # FleetView — navigable subagent list below editor
+    viewer-keys.ts        # Keybinding resolution for conversation viewer
 ```
 
 ## License

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Pipeline progress widget showing per-phase and per-step status
   - Event-driven orchestrator with concurrent Crafter support and worktree isolation
   - Gatekeeper fix loop (max 3 rounds) with in-scope/out-of-scope classification
+- **Milestone 8: Tests + cleanup** — comprehensive test coverage for pipeline modules, integration tests for concurrent Crafters and side-question non-blocking, agent widget rendering tests, worktree concurrent-isolation tests, README/CHANGELOG/package.json identity cleanup from `@tintinweb/pi-subagents` to `pi-party`
 
 ### Changed
 - Agent lineup updated: `Explore` replaced by `Scout`; old `Plan` replaced by pipeline-aware Plan; `Crafter` and `Gatekeeper` added

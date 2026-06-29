@@ -660,6 +660,70 @@ describe("Orchestrator — Integration", () => {
     }
   });
 
+  it("15.2 two independent steps dispatch both Crafters concurrently", () => {
+    const pi = mockPi();
+    const manager = mockManager();
+    const ledger = new Ledger();
+    const widget = mockWidget();
+    const fleet = mockFleet();
+    const getCtx = () => mockCtx();
+
+    const orch = new Orchestrator({ pi: pi as any, manager: manager as any, ledger, widget: widget as any, fleet: fleet as any, getCtx });
+
+    // Plan with two independent steps (no depends on)
+    writeFileSync(
+      join(TEST_DIR, "docs", "tasks", "concurrent-test.md"),
+      "# Concurrent Test\n\n**Created**: 2024-01-01T00:00:00.000Z\n**Status**: in-progress\n\n## Checklist\n- [ ] Add auth middleware {#auth-middleware}\n- [ ] Add logging helper {#logging-helper}\n",
+    );
+
+    orch.startPipeline({
+      task: "concurrent-test",
+      title: "Concurrent Test",
+      content: "## Checklist\n- [ ] Add auth middleware {#auth-middleware}\n- [ ] Add logging helper {#logging-helper}",
+      needsScout: false,
+      cwd: TEST_DIR,
+    });
+
+    // Manually set up crafting phase
+    const task = (orch as any).currentTask;
+    task.phase = "crafting";
+    task.planPath = join(TEST_DIR, "docs", "tasks", "concurrent-test.md");
+    task.approved = true;
+
+    manager._spawns.length = 0; // clear previous spawns
+    (orch as any).dispatchCrafters();
+
+    // Both steps should be dispatched (no dependencies, no ledger conflicts)
+    const craftSpawns = manager._spawns.filter(s => s.type === "Crafter");
+    expect(craftSpawns.length).toBe(2);
+
+    // Verify both steps are tracked in stepStates
+    const authState = task.stepStates.get("auth-middleware");
+    const logState = task.stepStates.get("logging-helper");
+    expect(authState).toBeDefined();
+    expect(logState).toBeDefined();
+    expect(authState.dispatched).toBe(true);
+    expect(logState.dispatched).toBe(true);
+
+    // Complete the first Crafter
+    const firstCrafterId = craftSpawns[0].id;
+    (orch as any).pipelineAgentIds.add(firstCrafterId);
+    task.agentToStep.set(firstCrafterId, "auth-middleware");
+
+    (pi.events as any).emit("subagents:completed", {
+      id: firstCrafterId,
+      type: "Crafter",
+      result: "Created auth middleware",
+      status: "completed",
+    });
+
+    // auth-middleware should be completed, logging-helper should still be dispatched
+    expect(authState.completed).toBe(true);
+    expect(logState.dispatched).toBe(true);
+    expect(logState.completed).toBe(false);
+  });
+
+
   it("15.3 dependent step waits for dependency", () => {
     const pi = mockPi();
     const manager = mockManager();
@@ -931,6 +995,65 @@ describe("Orchestrator — Integration", () => {
     // Pipeline should have completed (not crashed) with unresolved issues
     expect((orch as any).currentTask).toBeNull();
   });
+
+  it("15.8 second pipeline starts while first is in crafting phase", () => {
+    const pi = mockPi();
+    const manager = mockManager();
+    const ledger = new Ledger();
+    const widget = mockWidget();
+    const fleet = mockFleet();
+    const getCtx = () => mockCtx();
+
+    const orch = new Orchestrator({ pi: pi as any, manager: manager as any, ledger, widget: widget as any, fleet: fleet as any, getCtx });
+
+    // Start first pipeline
+    writeFileSync(
+      join(TEST_DIR, "docs", "tasks", "first-task.md"),
+      "# First Task\n\n**Created**: 2024-01-01T00:00:00.000Z\n**Status**: in-progress\n\n## Checklist\n- [ ] Step one {#step-one}\n",
+    );
+
+    orch.startPipeline({
+      task: "first-task",
+      title: "First Task",
+      content: "## Checklist\n- [ ] Step one {#step-one}",
+      needsScout: false,
+      cwd: TEST_DIR,
+    });
+
+    // Set to crafting with an in-flight Crafter
+    const firstTask = (orch as any).currentTask;
+    firstTask.phase = "crafting";
+    firstTask.planPath = join(TEST_DIR, "docs", "tasks", "first-task.md");
+    firstTask.approved = true;
+
+    // Simulate a Crafter already running
+    const crafterId = "craft-first";
+    firstTask.agentToStep.set(crafterId, "step-one");
+    (orch as any).pipelineAgentIds.add(crafterId);
+
+    manager._spawns.length = 0; // clear spawns
+
+    // Now start a second pipeline while first is in crafting phase
+    orch.startPipeline({
+      task: "second-task",
+      title: "Second Task",
+      content: "## Checklist\n- [ ] Step two {#step-two}",
+      needsScout: false,
+      cwd: TEST_DIR,
+    });
+
+    // First task's spawns should have been cleared by abort in startPipeline
+    // Second task should have spawned a Plan
+    const planSpawn = manager._spawns.find(s => s.type === "Plan");
+    expect(planSpawn).toBeDefined();
+
+    // Second task should exist with its own record
+    const secondTask = (orch as any).currentTask;
+    expect(secondTask).toBeDefined();
+    expect(secondTask.title).toBe("Second Task");
+    expect(secondTask.phase).toBe("plan");
+  });
+
 
   it("15.9 dispose during active pipeline stops all agents", () => {
     const pi = mockPi();
