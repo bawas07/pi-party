@@ -1,5 +1,6 @@
 /**
  * Model resolution: exact match ("provider/modelId") with fuzzy fallback.
+ * Also provides dynamic model selection by role preference.
  */
 
 export interface ModelEntry {
@@ -78,4 +79,81 @@ export function resolveModel(
     .sort()
     .join("\n");
   return `Model not found: "${input}".\n\nAvailable models:\n${modelList}`;
+}
+
+/**
+ * Select a model by role preference. Config-first, auto-assignment as fallback.
+ *
+ * @param preference - "fastest" | "thinking" | "inherit"
+ * @param registry - Model registry to query
+ * @param parentModel - Parent session's model (required for "inherit")
+ * @param modelPreferences - User-configured model preferences { thinking?, fast? }
+ */
+export function selectModel(
+  preference: "fastest" | "thinking" | "inherit",
+  registry: ModelRegistry,
+  parentModel?: any,
+  modelPreferences?: { thinking?: string; fast?: string },
+): any {
+  const available = (registry.getAvailable?.() ?? registry.getAll()) as ModelEntry[];
+
+  if (available.length === 0) {
+    throw new Error(`selectModel: no models available for preference "${preference}". Ensure at least one model is configured with valid credentials.`);
+  }
+
+  // 1. "inherit" — return parent model, fall back to thinking
+  if (preference === "inherit") {
+    if (parentModel) {
+      // Verify parent model is still available
+      const parentId = typeof parentModel === "string" ? parentModel : `${parentModel.provider}/${parentModel.id}`;
+      const availableSet = new Set(available.map(m => `${m.provider}/${m.id}`));
+      if (availableSet.has(parentId)) return parentModel;
+      console.warn(`[pi-subagents] Parent model "${parentId}" not in available registry, falling back to thinking preference.`);
+    }
+    return selectModel("thinking", registry, undefined, modelPreferences);
+  }
+
+  // 2. Config-driven — check user preferences first
+  const configKey = preference === "fastest" ? "fast" : "thinking";
+  const configuredModel = modelPreferences?.[configKey];
+  if (configuredModel) {
+    const slashIdx = configuredModel.indexOf("/");
+    if (slashIdx !== -1) {
+      const provider = configuredModel.slice(0, slashIdx);
+      const modelId = configuredModel.slice(slashIdx + 1);
+      const found = registry.find(provider, modelId);
+      if (found) return found;
+      console.warn(`[pi-subagents] Configured ${configKey} model "${configuredModel}" not in available registry, falling back to auto-assignment.`);
+    }
+  }
+
+  // 3. Auto-assignment — rank by context window
+  // Ascending for fastest (smallest first), descending for thinking (largest first)
+  const sorted = [...available].sort((a, b) => {
+    const ctxA = getContextWindow(registry, a);
+    const ctxB = getContextWindow(registry, b);
+    return preference === "fastest" ? ctxA - ctxB : ctxB - ctxA;
+  });
+
+  const best = sorted[0];
+  const found = registry.find(best.provider, best.id);
+  if (found) return found;
+
+  throw new Error(`selectModel: could not resolve model for preference "${preference}".`);
+}
+
+/** Extract context window size from a model entry. Returns 0 if unavailable. */
+function getContextWindow(registry: ModelRegistry, entry: ModelEntry): number {
+  try {
+    const model = registry.find(entry.provider, entry.id);
+    if (model?.contextWindow && typeof model.contextWindow === "number") {
+      return model.contextWindow;
+    }
+    // Try common alternate property names
+    if (model?.maxTokens && typeof model.maxTokens === "number") return model.maxTokens;
+    if (model?.maxInputTokens && typeof model.maxInputTokens === "number") return model.maxInputTokens;
+  } catch {
+    // Ignore — return 0
+  }
+  return 0;
 }

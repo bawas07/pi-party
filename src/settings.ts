@@ -72,6 +72,16 @@ export interface SubagentsSettings {
    * the list never registers and the global key handler never captures input.
    */
   fleetView?: boolean;
+  /**
+   * User-configured model preferences for dynamic model selection.
+   * `thinking` and `fast` accept "provider/modelId" strings.
+   * When set, selectModel() uses these directly instead of auto-assignment.
+   * Project settings override global (same merge behavior as all other settings).
+   */
+  modelPreferences?: {
+    thinking?: string;
+    fast?: string;
+  };
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -87,6 +97,8 @@ export interface SettingsAppliers {
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
   setFleetView: (b: boolean) => void;
+  /** Set model preferences for dynamic model selection. */
+  setModelPreferences: (prefs: { thinking?: string; fast?: string } | undefined) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -145,6 +157,13 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.fleetView === "boolean") {
     out.fleetView = r.fleetView;
+  }
+  if (r.modelPreferences && typeof r.modelPreferences === "object" && !Array.isArray(r.modelPreferences)) {
+    const mp = r.modelPreferences as Record<string, unknown>;
+    const prefs: { thinking?: string; fast?: string } = {};
+    if (typeof mp.thinking === "string" && mp.thinking.includes("/")) prefs.thinking = mp.thinking;
+    if (typeof mp.fast === "string" && mp.fast.includes("/")) prefs.fast = mp.fast;
+    if (prefs.thinking || prefs.fast) out.modelPreferences = prefs;
   }
   return out;
 }
@@ -205,6 +224,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
+  if (s.modelPreferences) appliers.setModelPreferences(s.modelPreferences);
 }
 
 /**

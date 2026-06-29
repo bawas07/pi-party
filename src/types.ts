@@ -11,8 +11,11 @@ export type { ThinkingLevel };
 /** Agent type: any string name (built-in defaults or user-defined). */
 export type SubagentType = string;
 
+/** Model preference for dynamic model selection at spawn time. */
+export type ModelPreference = "fastest" | "thinking" | "inherit";
+
 /** Names of the three embedded default agents. */
-export const DEFAULT_AGENT_NAMES = ["general-purpose", "Explore", "Plan"] as const;
+export const DEFAULT_AGENT_NAMES = ["general-purpose", "Scout", "Plan", "Crafter", "Gatekeeper"] as const;
 
 /** Memory scope for persistent agent memory. */
 export type MemoryScope = "user" | "project" | "local";
@@ -39,6 +42,9 @@ export interface AgentConfig {
   /** true = inherit all, string[] = only listed, false = none */
   skills: true | string[] | false;
   model?: string;
+  /** Model preference for dynamic selection at spawn time ("fastest", "thinking", "inherit").
+   * When set, overrides the static `model` field. Resolved by selectModel() at spawn. */
+  modelPreference?: ModelPreference;
   thinking?: ThinkingLevel;
   maxTurns?: number;
   /** Persist this subagent as a normal pi session instead of keeping it in memory only. */
