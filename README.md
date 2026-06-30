@@ -123,11 +123,13 @@ Group completions render each agent as a separate block. The LLM receives struct
 
 | Type | Tools | Model | Prompt Mode | Description |
 |------|-------|-------|-------------|-------------|
-| `general-purpose` | all 7 | inherit | `append` (parent twin) | Inherits the parent's full system prompt — same rules, CLAUDE.md, project conventions |
-| `Scout` | read, bash, grep, find, ls | fastest available | `replace` (standalone) | Fast codebase exploration (read-only) |
-| `Plan` | read, bash, grep, find, ls | inherit | `replace` (standalone) | Pipeline architect for implementation planning (read-only) |
+| `general-purpose` | all 7 | general† | `append` (parent twin) | Inherits the parent's full system prompt — same rules, CLAUDE.md, project conventions |
+| `Scout` | read, bash, grep, find, ls | fast† | `replace` (standalone) | Fast codebase exploration (read-only) |
+| `Plan` | read, bash, grep, find, ls | thinking† | `replace` (standalone) | Pipeline architect for implementation planning (read-only) |
 | `Crafter` | all 7 | inherit | `replace` (standalone) | Implementation agent with self-review and coding standards |
-| `Gatekeeper` | read, bash, grep, find, ls | inherit | `replace` (standalone) | QA & review through three lenses: code quality, architecture, security |
+| `Gatekeeper` | read, bash, grep, find, ls | thinking† | `replace` (standalone) | QA & review through three lenses: code quality, architecture, security |
+
+† Configured via `party.rules.json`. Run `/party-rules` to set models for fast, general, and thinking preferences. Falls back to parent model if not configured.
 
 The `general-purpose` agent is a **parent twin** — it receives the parent's entire system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. Scout, Plan, Crafter, and Gatekeeper use standalone prompts tailored to their specific roles.
 

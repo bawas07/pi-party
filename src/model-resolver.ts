@@ -82,18 +82,28 @@ export function resolveModel(
 }
 
 /**
- * Select a model by role preference. Config-first, auto-assignment as fallback.
+ * Party rules for model assignment. Keys map to ModelPreference values.
+ * Loaded from party.rules.json (global and/or local).
+ */
+export interface PartyRulesConfig {
+  fast?: string;
+  general?: string;
+  thinking?: string;
+}
+
+/**
+ * Select a model by role preference. Config-driven — requires party.rules.json.
  *
- * @param preference - "fastest" | "thinking" | "inherit"
+ * @param preference - "fast" | "general" | "thinking" | "inherit"
  * @param registry - Model registry to query
  * @param parentModel - Parent session's model (required for "inherit")
- * @param modelPreferences - User-configured model preferences { thinking?, fast? }
+ * @param rules - Party rules from party.rules.json (required for non-inherit)
  */
 export function selectModel(
-  preference: "fastest" | "thinking" | "inherit",
+  preference: "fast" | "general" | "thinking" | "inherit",
   registry: ModelRegistry,
   parentModel?: any,
-  modelPreferences?: { thinking?: string; fast?: string },
+  rules?: PartyRulesConfig,
 ): any {
   const available = (registry.getAvailable?.() ?? registry.getAll()) as ModelEntry[];
 
@@ -101,21 +111,20 @@ export function selectModel(
     throw new Error(`selectModel: no models available for preference "${preference}". Ensure at least one model is configured with valid credentials.`);
   }
 
-  // 1. "inherit" — return parent model, fall back to thinking
+  // 1. "inherit" — return parent model, fall back to configured thinking
   if (preference === "inherit") {
     if (parentModel) {
-      // Verify parent model is still available
       const parentId = typeof parentModel === "string" ? parentModel : `${parentModel.provider}/${parentModel.id}`;
       const availableSet = new Set(available.map(m => `${m.provider}/${m.id}`));
       if (availableSet.has(parentId)) return parentModel;
-      console.warn(`[pi-subagents] Parent model "${parentId}" not in available registry, falling back to thinking preference.`);
+      console.warn(`[pi-party] Parent model "${parentId}" not in available registry, falling back to thinking preference.`);
     }
-    return selectModel("thinking", registry, undefined, modelPreferences);
+    return selectModel("thinking", registry, undefined, rules);
   }
 
-  // 2. Config-driven — check user preferences first
-  const configKey = preference === "fastest" ? "fast" : "thinking";
-  const configuredModel = modelPreferences?.[configKey];
+  // 2. Config-driven — party.rules.json
+  const configKey = preference as string; // "fast", "general", or "thinking"
+  const configuredModel = rules?.[configKey as keyof PartyRulesConfig];
   if (configuredModel) {
     const slashIdx = configuredModel.indexOf("/");
     if (slashIdx !== -1) {
@@ -123,37 +132,13 @@ export function selectModel(
       const modelId = configuredModel.slice(slashIdx + 1);
       const found = registry.find(provider, modelId);
       if (found) return found;
-      console.warn(`[pi-subagents] Configured ${configKey} model "${configuredModel}" not in available registry, falling back to auto-assignment.`);
+      console.warn(`[pi-party] Configured ${configKey} model "${configuredModel}" not in available registry.`);
     }
   }
 
-  // 3. Auto-assignment — rank by context window
-  // Ascending for fastest (smallest first), descending for thinking (largest first)
-  const sorted = [...available].sort((a, b) => {
-    const ctxA = getContextWindow(registry, a);
-    const ctxB = getContextWindow(registry, b);
-    return preference === "fastest" ? ctxA - ctxB : ctxB - ctxA;
-  });
-
-  const best = sorted[0];
-  const found = registry.find(best.provider, best.id);
-  if (found) return found;
-
-  throw new Error(`selectModel: could not resolve model for preference "${preference}".`);
-}
-
-/** Extract context window size from a model entry. Returns 0 if unavailable. */
-function getContextWindow(registry: ModelRegistry, entry: ModelEntry): number {
-  try {
-    const model = registry.find(entry.provider, entry.id);
-    if (model?.contextWindow && typeof model.contextWindow === "number") {
-      return model.contextWindow;
-    }
-    // Try common alternate property names
-    if (model?.maxTokens && typeof model.maxTokens === "number") return model.maxTokens;
-    if (model?.maxInputTokens && typeof model.maxInputTokens === "number") return model.maxInputTokens;
-  } catch {
-    // Ignore — return 0
-  }
-  return 0;
+  // 3. No config — error with guidance
+  throw new Error(
+    `No model configured for "${preference}" preference. ` +
+    `Create a party.rules.json with a "${configKey}" entry, or run /party-rules to set one up interactively.`,
+  );
 }

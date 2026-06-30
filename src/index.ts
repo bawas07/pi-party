@@ -22,12 +22,13 @@ import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
-import { type ModelRegistry, resolveModel } from "./model-resolver.js";
+import { type ModelRegistry, resolveModel, selectModel } from "./model-resolver.js";
+import { describePartyRulesSources, loadPartyRules, partyRulesExists, partyRulesPath, savePartyRules, type PartyRules } from "./party-rules.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { Ledger } from "./ledger.js";
 import { Orchestrator } from "./orchestrator.js";
 import { checkPlanningGate } from "./planning-gate.js";
-import { evaluateAll, type TurnContext } from "./trigger.js";
+import { classifyWithLLM, evaluateAll, type TurnContext } from "./trigger.js";
 
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
@@ -471,7 +472,33 @@ export default function (pi: ExtensionAPI) {
       if (!userMessage) return;  // skip if no user message found
 
       const turnCtx: TurnContext = { userMessage };
-      const result = evaluateAll(turnCtx);
+
+      // Try LLM classification for noPlanIntent + implementIntent.
+      // Falls back to regex if model info is unavailable or the call fails.
+      let result: TriggerResult;
+      try {
+        const model = ctx.model ?? ctx.modelRegistry?.find?.("haiku" as any);
+        if (model && (model as any).provider) {
+          const provider = (model as any).provider;
+          const apiKey = await (ctx.modelRegistry as any).getApiKeyAndHeaders?.(model).then(
+            (r: any) => r?.apiKey ?? "",
+          ).catch(() => "");
+          if (apiKey) {
+            result = await classifyWithLLM(turnCtx, {
+              provider: typeof provider === "string" ? provider : provider?.id ?? provider,
+              apiKey,
+              modelId: (model as any).id ?? undefined,
+              baseUrl: (model as any).baseUrl ?? undefined,
+            });
+          } else {
+            result = evaluateAll(turnCtx);
+          }
+        } else {
+          result = evaluateAll(turnCtx);
+        }
+      } catch {
+        result = evaluateAll(turnCtx);
+      }
 
       // Route: noPlanIntent → set flag
       if (result.noPlanIntent) {
@@ -499,14 +526,10 @@ export default function (pi: ExtensionAPI) {
         } as any);
       }
 
-      // Route: needsScout → dispatch Scout independently (always, regardless of implementIntent)
-      if (result.needsScout && currentCtx) {
-        manager.spawn(pi as any, currentCtx as any, "Scout", userMessage, {
-          description: `Scout: ${userMessage.slice(0, 60)}`,
-          isBackground: true,
-          cwd: ctx.cwd,
-        });
-      }
+      // Route: needsScout → Scout dispatch is now prompt-guided (original approach).
+      // The main agent's system prompt instructs it to use Scout proactively
+      // for codebase exploration. The trigger hook only handles pipeline routing.
+      // needsScout result is still passed to orchestrator for pipeline Scout-before-Plan decisions.
     } catch (_err) {
       // Trigger hook failure is non-fatal — log and continue
       console.warn("[pi-party] Trigger hook evaluation failed:", _err);
@@ -584,13 +607,6 @@ export default function (pi: ExtensionAPI) {
   function setDisableDefaultAgents(b: boolean): void {
     setDefaultsDisabled(b);
     reloadCustomAgents(); // re-register with new setting
-  }
-
-  // ---- Model preferences (user-configured thinking/fast model overrides) ----
-  let modelPreferences: { thinking?: string; fast?: string } | undefined;
-  function getModelPreferences() { return modelPreferences; }
-  function setModelPreferences(prefs: { thinking?: string; fast?: string } | undefined): void {
-    modelPreferences = prefs;
   }
 
   // ---- Agent tool description mode ----
@@ -706,7 +722,6 @@ export default function (pi: ExtensionAPI) {
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: setFleetViewEnabled,
-      setModelPreferences,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -998,6 +1013,16 @@ Terse command-style prompts produce shallow, generic work.
           // config-specified: silent fallback to parent
         } else {
           model = resolved;
+        }
+      } else if (customConfig?.modelPreference) {
+        // Dynamic model selection via party.rules.json
+        const rules = loadPartyRules();
+        try {
+          model = selectModel(customConfig.modelPreference, ctx.modelRegistry, ctx.model, rules);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[pi-party] ${msg}`);
+          // Fall back to parent model — user should run /party-rules to configure
         }
       }
 
@@ -2130,6 +2155,103 @@ ${systemPrompt}
     }
   }
 
+  // ---- /party-rules wizard ----
+  async function showPartyRulesWizard(ctx: ExtensionCommandContext) {
+    // Show current state
+    const currentRules = loadPartyRules(ctx.cwd);
+    const sources = describePartyRulesSources(ctx.cwd);
+    const hasAny = currentRules.fast || currentRules.general || currentRules.thinking;
+
+    if (hasAny) {
+      const currentInfo = [
+        `Current party rules:`,
+        currentRules.fast ? `  fast:     ${currentRules.fast}` : null,
+        currentRules.general ? `  general:  ${currentRules.general}` : null,
+        currentRules.thinking ? `  thinking: ${currentRules.thinking}` : null,
+        `  (${sources})`,
+      ].filter(Boolean).join("\n");
+      ctx.ui.notify(currentInfo, "info");
+    } else {
+      ctx.ui.notify(sources, "info");
+    }
+
+    // Step 1: Ask for fast model
+    const fastModel = await ctx.ui.input(
+      "Model for fast agents (e.g. openai/gpt-4o-mini) — Esc to skip:",
+      currentRules.fast ?? "",
+    );
+    if (fastModel === undefined) return; // user cancelled
+
+    // Step 2: Ask for general model
+    const generalModel = await ctx.ui.input(
+      "Model for general agents (e.g. anthropic/claude-sonnet-4-6) — Esc to skip:",
+      currentRules.general ?? "",
+    );
+    if (generalModel === undefined) return;
+
+    // Step 3: Ask for thinking model
+    const thinkingModel = await ctx.ui.input(
+      "Model for thinking agents (e.g. anthropic/claude-opus-4-6) — Esc to skip:",
+      currentRules.thinking ?? "",
+    );
+    if (thinkingModel === undefined) return;
+
+    // Validate at least one model is configured
+    const rules: PartyRules = {};
+    if (fastModel.trim()) rules.fast = fastModel.trim();
+    if (generalModel.trim()) rules.general = generalModel.trim();
+    if (thinkingModel.trim()) rules.thinking = thinkingModel.trim();
+
+    if (!rules.fast && !rules.general && !rules.thinking) {
+      ctx.ui.notify("No models configured. Party rules unchanged.", "warning");
+      return;
+    }
+
+    // Validate format: each must be "provider/modelId"
+    for (const [key, val] of Object.entries(rules)) {
+      if (val && !val.includes("/")) {
+        ctx.ui.notify(`Invalid format for ${key}: "${val}". Must be "provider/modelId" (e.g. openai/gpt-4o).`, "error");
+        return;
+      }
+    }
+
+    // Step 4: Ask where to save
+    const scopeChoice = await ctx.ui.select("Where to save party rules?", [
+      "Local (.pi/party.rules.json) — this project only",
+      "Global (~/.pi/agent/party.rules.json) — all projects",
+    ]);
+    if (!scopeChoice) return;
+
+    const scope = scopeChoice.startsWith("Local") ? "local" as const : "global" as const;
+    const targetPath = partyRulesPath(scope, ctx.cwd);
+
+    // Step 5: If file exists, confirm override
+    if (partyRulesExists(scope, ctx.cwd)) {
+      const confirm = await ctx.ui.select(
+        `party.rules.json already exists at ${targetPath}. Override?`,
+        ["Yes, override", "No, cancel"],
+      );
+      if (!confirm || confirm.startsWith("No")) {
+        ctx.ui.notify("Party rules unchanged.", "info");
+        return;
+      }
+    }
+
+    // Save
+    const ok = savePartyRules(rules, scope, ctx.cwd);
+    if (ok) {
+      const summary = [
+        `Party rules saved to ${scope} (${targetPath}):`,
+        rules.fast ? `  fast:     ${rules.fast}` : null,
+        rules.general ? `  general:  ${rules.general}` : null,
+        rules.thinking ? `  thinking: ${rules.thinking}` : null,
+      ].filter(Boolean).join("\n");
+      ctx.ui.notify(summary, "info");
+    } else {
+      ctx.ui.notify(`Failed to save party rules to ${targetPath}.`, "error");
+    }
+  }
+
   // Persist the current snapshot, emit `subagents:settings_changed`, and surface
   // the right toast. Successful saves show info; persistence failures downgrade
   // to warning so users aren't silently reverted on restart. Event fires regardless
@@ -2170,5 +2292,11 @@ ${systemPrompt}
   pi.registerCommand("pipeline", {
     description: "Alias for /summoner — start the implementation pipeline",
     handler: async (args, ctx) => { await summonerHandler(args, ctx); },
+  });
+
+  // ---- /party-rules: interactive party.rules.json config generator ----
+  pi.registerCommand("party-rules", {
+    description: "Configure model assignments for agent types (fast, general, thinking)",
+    handler: async (_args, ctx) => { await showPartyRulesWizard(ctx); },
   });
 }

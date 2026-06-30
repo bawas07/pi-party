@@ -12,7 +12,7 @@ export type { ThinkingLevel };
 export type SubagentType = string;
 
 /** Model preference for dynamic model selection at spawn time. */
-export type ModelPreference = "fastest" | "thinking" | "inherit";
+export type ModelPreference = "fast" | "general" | "thinking" | "inherit";
 
 /** Names of the three embedded default agents. */
 export const DEFAULT_AGENT_NAMES = ["general-purpose", "Scout", "Plan", "Crafter", "Gatekeeper"] as const;
@@ -42,7 +42,7 @@ export interface AgentConfig {
   /** true = inherit all, string[] = only listed, false = none */
   skills: true | string[] | false;
   model?: string;
-  /** Model preference for dynamic selection at spawn time ("fastest", "thinking", "inherit").
+  /** Model preference for dynamic selection at spawn time ("fast", "general", "thinking", "inherit").
    * When set, overrides the static `model` field. Resolved by selectModel() at spawn. */
   modelPreference?: ModelPreference;
   thinking?: ThinkingLevel;

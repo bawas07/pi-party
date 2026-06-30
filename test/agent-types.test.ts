@@ -66,7 +66,7 @@ describe("agent type registry", () => {
     it("case-insensitive lookup works for getAgentConfig", () => {
       const config = getAgentConfig("scout");
       expect(config?.name).toBe("Scout");
-      expect(config?.modelPreference).toBe("fastest");
+      expect(config?.modelPreference).toBe("fast");
     });
 
     it("resolveType returns canonical key or undefined", () => {

@@ -33,7 +33,7 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       builtinToolNames: READ_ONLY_TOOLS,
       extensions: true,
       skills: true,
-      modelPreference: "fastest",
+      modelPreference: "fast",
       systemPrompt: `# CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS
 You are Scout — a codebase knowledge provider. You excel at thoroughly navigating and understanding codebases.
 Your role is EXCLUSIVELY to search, analyze, and explain existing code. You do NOT have access to file editing tools.
