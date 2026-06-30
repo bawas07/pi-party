@@ -28,7 +28,7 @@ import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./o
 import { Ledger } from "./ledger.js";
 import { Orchestrator } from "./orchestrator.js";
 import { checkPlanningGate } from "./planning-gate.js";
-import { evaluateAll, type TurnContext } from "./trigger.js";
+import { classifyWithLLM, evaluateAll, type TurnContext } from "./trigger.js";
 
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
@@ -488,8 +488,38 @@ export default function (pi: ExtensionAPI) {
 
       const turnCtx: TurnContext = { userMessage };
 
-      // Regex-only classification — fast, deterministic, no API key needed.
-      const result = evaluateAll(turnCtx);
+      // Try LLM classification using a cheap available model.
+      // Falls back to regex if no model with API key is found.
+      let result: TriggerResult;
+      try {
+        // Pick a cheap model from available (auth-configured) models — never use
+        // ctx.model (the parent session model) since it may lack API keys.
+        const available = (ctx.modelRegistry as any)?.getAvailable?.() as any[] | undefined;
+        const cheapModel = available?.find((m: any) =>
+          /haiku|flash|mini|small|tiny|nano|lite/i.test(m.id ?? m.name ?? "")
+        ) ?? available?.[0];
+
+        if (cheapModel?.provider) {
+          const provider = cheapModel.provider;
+          const apiKey = await (ctx.modelRegistry as any).getApiKeyAndHeaders?.(cheapModel).then(
+            (r: any) => r?.apiKey ?? "",
+          ).catch(() => "");
+          if (apiKey) {
+            result = await classifyWithLLM(turnCtx, {
+              provider: typeof provider === "string" ? provider : provider?.id ?? provider,
+              apiKey,
+              modelId: cheapModel.id ?? undefined,
+              baseUrl: cheapModel.baseUrl ?? undefined,
+            });
+          } else {
+            result = evaluateAll(turnCtx);
+          }
+        } else {
+          result = evaluateAll(turnCtx);
+        }
+      } catch {
+        result = evaluateAll(turnCtx);
+      }
 
       // Route: noPlanIntent → set flag
       if (result.noPlanIntent) {
