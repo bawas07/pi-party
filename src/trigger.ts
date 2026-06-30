@@ -183,9 +183,10 @@ const CLASSIFY_SYSTEM_PROMPT = `You are an intent classifier. Classify user mess
 Rules:
 - noPlanIntent: true ONLY if the user EXPLICITLY says to skip planning. Examples: "no need to plan", "just implement it directly", "don't plan this", "skip the plan", "go ahead and build it". Be conservative — casual or brief phrasing is NOT a skip-plan signal. Only return true when the user literally says not to plan.
 - implementIntent: "high" if the user wants code written/built/refactored/added NOW. "medium" if they're asking about implementation approach, seeking recommendations, or exploring options. "low" for general discussion, questions, or anything else.
+- needsScout: true if the user's request requires codebase exploration (finding files, locating definitions, understanding structure). false for self-contained tasks or pure Q&A.
 
 Return ONLY a JSON object, no other text:
-{"noPlanIntent": true|false, "implementIntent": "high"|"medium"|"low"}`;
+{"noPlanIntent": true|false, "implementIntent": "high"|"medium"|"low", "needsScout": true|false}`;
 
 /**
  * Classify user intent using an LLM call (haiku for speed/cost).
@@ -205,7 +206,7 @@ export async function classifyWithLLM(
       implementIntent: ["high", "medium", "low"].includes(parsed.implementIntent)
         ? parsed.implementIntent
         : "low",
-      needsScout: needsScout(ctx), // still regex-based, prompt-guided for standalone dispatch
+      needsScout: typeof parsed.needsScout === "boolean" ? parsed.needsScout : needsScout(ctx),
     };
   } catch {
     // Fallback to regex on any LLM failure
@@ -242,28 +243,38 @@ async function callProviderAPI(
   }
 
   if (modelInfo.provider === "openai" || modelInfo.provider === "openai-codex") {
-    const baseUrl = modelInfo.baseUrl ?? "https://api.openai.com";
-    const resp = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${modelInfo.apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: modelId,
-        max_tokens: 50,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userMessage },
-        ],
-      }),
-    });
-    if (!resp.ok) throw new Error(`OpenAI API error: ${resp.status}`);
-    const data = await resp.json() as any;
-    return data?.choices?.[0]?.message?.content ?? "";
+    return callOpenAICompatible(modelInfo, systemPrompt, userMessage, modelInfo.baseUrl ?? "https://api.openai.com");
   }
 
-  throw new Error(`Unsupported provider: ${modelInfo.provider}`);
+  // Default: OpenAI-compatible API (covers openrouter, opencode, groq, together, xai, etc.)
+  return callOpenAICompatible(modelInfo, systemPrompt, userMessage, modelInfo.baseUrl ?? "https://api.openai.com");
+}
+
+async function callOpenAICompatible(
+  modelInfo: { provider: string; apiKey: string; modelId?: string },
+  systemPrompt: string,
+  userMessage: string,
+  baseUrl: string,
+): Promise<string> {
+  const modelId = modelInfo.modelId ?? "deepseek-v4-flash";
+  const resp = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${modelInfo.apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: modelId,
+      max_tokens: 50,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+    }),
+  });
+  if (!resp.ok) throw new Error(`API error (${modelInfo.provider}): ${resp.status}`);
+  const data = await resp.json() as any;
+  return data?.choices?.[0]?.message?.content ?? "";
 }
 
 /**

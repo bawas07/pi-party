@@ -488,28 +488,34 @@ export default function (pi: ExtensionAPI) {
 
       const turnCtx: TurnContext = { userMessage };
 
-      // Try LLM classification using a cheap available model.
-      // Falls back to regex if no model with API key is found.
+      // Try LLM classification using the user's configured fast model.
+      // Falls back to regex if no fast model is configured or API key is missing.
       let result: TriggerResult;
       try {
-        // Pick a cheap model from available (auth-configured) models — never use
-        // ctx.model (the parent session model) since it may lack API keys.
-        const available = (ctx.modelRegistry as any)?.getAvailable?.() as any[] | undefined;
-        const cheapModel = available?.find((m: any) =>
-          /haiku|flash|mini|small|tiny|nano|lite/i.test(m.id ?? m.name ?? "")
-        ) ?? available?.[0];
+        const rules = loadPartyRules();
+        const fastModelId = rules.fast; // "provider/modelId" from party.rules.json
+        let model: any = undefined;
 
-        if (cheapModel?.provider) {
-          const provider = cheapModel.provider;
-          const apiKey = await (ctx.modelRegistry as any).getApiKeyAndHeaders?.(cheapModel).then(
+        if (fastModelId) {
+          const slashIdx = fastModelId.indexOf("/");
+          if (slashIdx !== -1) {
+            const provider = fastModelId.slice(0, slashIdx);
+            const modelId = fastModelId.slice(slashIdx + 1);
+            model = (ctx.modelRegistry as any)?.find?.(provider, modelId);
+          }
+        }
+
+        if (model?.provider) {
+          const provider = model.provider;
+          const apiKey = await (ctx.modelRegistry as any).getApiKeyAndHeaders?.(model).then(
             (r: any) => r?.apiKey ?? "",
           ).catch(() => "");
           if (apiKey) {
             result = await classifyWithLLM(turnCtx, {
               provider: typeof provider === "string" ? provider : provider?.id ?? provider,
               apiKey,
-              modelId: cheapModel.id ?? undefined,
-              baseUrl: cheapModel.baseUrl ?? undefined,
+              modelId: model.id ?? undefined,
+              baseUrl: model.baseUrl ?? undefined,
             });
           } else {
             result = evaluateAll(turnCtx);
