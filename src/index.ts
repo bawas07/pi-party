@@ -22,7 +22,7 @@ import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
-import { type ModelRegistry, resolveModel, selectModel } from "./model-resolver.js";
+import { type ModelEntry, type ModelRegistry, resolveModel, selectModel } from "./model-resolver.js";
 import { describePartyRulesSources, loadPartyRules, partyRulesExists, partyRulesPath, savePartyRules, type PartyRules } from "./party-rules.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { Ledger } from "./ledger.js";
@@ -2157,6 +2157,22 @@ ${systemPrompt}
 
   // ---- /party-rules wizard ----
   async function showPartyRulesWizard(ctx: ExtensionCommandContext) {
+    // Build available model list from registry
+    const registry = ctx.modelRegistry as ModelRegistry | undefined;
+    const rawModels = (registry?.getAvailable?.() ?? registry?.getAll?.() ?? []) as ModelEntry[];
+    const modelLabels = rawModels.map(m => `${m.provider}/${m.id} — ${m.name}`);
+
+    if (modelLabels.length === 0) {
+      ctx.ui.notify("No models available in the registry. Configure at least one model with valid credentials first.", "error");
+      return;
+    }
+
+    // Build a lookup: label → "provider/modelId"
+    const labelToId = new Map<string, string>();
+    for (const m of rawModels) {
+      labelToId.set(`${m.provider}/${m.id} — ${m.name}`, `${m.provider}/${m.id}`);
+    }
+
     // Show current state
     const currentRules = loadPartyRules(ctx.cwd);
     const sources = describePartyRulesSources(ctx.cwd);
@@ -2175,44 +2191,58 @@ ${systemPrompt}
       ctx.ui.notify(sources, "info");
     }
 
-    // Step 1: Ask for fast model
-    const fastModel = await ctx.ui.input(
-      "Model for fast agents (e.g. openai/gpt-4o-mini) — Esc to skip:",
-      currentRules.fast ?? "",
-    );
-    if (fastModel === undefined) return; // user cancelled
+    /**
+     * Present a model picker with the current value marked and a skip option.
+     * Returns:
+     *   - "provider/modelId" string when user picks a model
+     *   - null when user chooses "Skip" (explicit skip, keep whatever was there)
+     *   - undefined when user presses Esc (cancel the whole wizard)
+     */
+    async function pickModel(
+      label: string,
+      currentValue?: string,
+    ): Promise<string | null | undefined> {
+      const options: string[] = [];
 
-    // Step 2: Ask for general model
-    const generalModel = await ctx.ui.input(
-      "Model for general agents (e.g. anthropic/claude-sonnet-4-6) — Esc to skip:",
-      currentRules.general ?? "",
-    );
-    if (generalModel === undefined) return;
+      for (const ml of modelLabels) {
+        const id = labelToId.get(ml)!;
+        options.push(id === currentValue ? `✓ ${ml} (current)` : `  ${ml}`);
+      }
 
-    // Step 3: Ask for thinking model
-    const thinkingModel = await ctx.ui.input(
-      "Model for thinking agents (e.g. anthropic/claude-opus-4-6) — Esc to skip:",
-      currentRules.thinking ?? "",
-    );
-    if (thinkingModel === undefined) return;
+      options.push(currentValue ? "— Keep current (skip)" : "— Skip");
 
-    // Validate at least one model is configured
+      const choice = await ctx.ui.select(label, options);
+      if (!choice) return undefined; // Esc → cancel wizard
+      if (choice.startsWith("—")) return null; // explicit skip
+
+      const clean = choice.replace(/^[✓ ]+\s*/, "");
+      return labelToId.get(clean);
+    }
+
+    // Step 1: Pick fast model
+    const fastResult = await pickModel("Model for fast agents (Scout, etc.):", currentRules.fast);
+    if (fastResult === undefined) return; // Esc
+    const fastModel = fastResult ?? currentRules.fast; // null → keep current
+
+    // Step 2: Pick general model
+    const generalResult = await pickModel("Model for general agents:", currentRules.general);
+    if (generalResult === undefined) return;
+    const generalModel = generalResult ?? currentRules.general;
+
+    // Step 3: Pick thinking model
+    const thinkingResult = await pickModel("Model for thinking agents (Plan, Gatekeeper):", currentRules.thinking);
+    if (thinkingResult === undefined) return;
+    const thinkingModel = thinkingResult ?? currentRules.thinking;
+
+    // Build rules from selections
     const rules: PartyRules = {};
-    if (fastModel.trim()) rules.fast = fastModel.trim();
-    if (generalModel.trim()) rules.general = generalModel.trim();
-    if (thinkingModel.trim()) rules.thinking = thinkingModel.trim();
+    if (fastModel?.includes("/")) rules.fast = fastModel;
+    if (generalModel?.includes("/")) rules.general = generalModel;
+    if (thinkingModel?.includes("/")) rules.thinking = thinkingModel;
 
     if (!rules.fast && !rules.general && !rules.thinking) {
       ctx.ui.notify("No models configured. Party rules unchanged.", "warning");
       return;
-    }
-
-    // Validate format: each must be "provider/modelId"
-    for (const [key, val] of Object.entries(rules)) {
-      if (val && !val.includes("/")) {
-        ctx.ui.notify(`Invalid format for ${key}: "${val}". Must be "provider/modelId" (e.g. openai/gpt-4o).`, "error");
-        return;
-      }
     }
 
     // Step 4: Ask where to save
