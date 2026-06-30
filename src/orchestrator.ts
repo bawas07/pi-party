@@ -171,6 +171,48 @@ export class Orchestrator {
     return this.currentTask?.approved === true;
   }
 
+  /** Whether the pipeline is waiting for user approval. */
+  isAwaitingApproval(): boolean {
+    return this.currentTask?.phase === "awaiting-approval";
+  }
+
+  /**
+   * Approve the current plan and dispatch Crafters.
+   * Called when the user replies "approve" during awaiting-approval phase.
+   */
+  approvePlan(): void {
+    const task = this.currentTask;
+    if (!task || task.phase !== "awaiting-approval") return;
+
+    task.approved = true;
+
+    this.pi.sendMessage({
+      customType: "text",
+      content: `Pipeline: Plan approved. Dispatching Crafters for "${task.title}"...`,
+      display: true,
+    } as any);
+
+    this.dispatchCrafters();
+  }
+
+  /**
+   * Reject the current plan and abort the pipeline.
+   * Called when the user replies "reject" during awaiting-approval phase.
+   */
+  rejectPlan(): void {
+    if (!this.currentTask || this.currentTask.phase !== "awaiting-approval") return;
+
+    const title = this.currentTask.title;
+
+    this.pi.sendMessage({
+      customType: "text",
+      content: `Pipeline: Plan rejected for "${title}". Pipeline stopped.`,
+      display: true,
+    } as any);
+
+    this.abort();
+  }
+
   /**
    * Start the pipeline. Aborts any active pipeline first.
    *

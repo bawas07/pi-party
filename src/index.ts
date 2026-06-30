@@ -471,6 +471,21 @@ export default function (pi: ExtensionAPI) {
 
       if (!userMessage) return;  // skip if no user message found
 
+      // ---- Pipeline approval gate: intercept approve/reject during awaiting-approval ----
+      if (orchestrator.isAwaitingApproval()) {
+        const trimmed = userMessage.trim().toLowerCase();
+        if (trimmed === "approve" || trimmed.startsWith("approve")) {
+          orchestrator.approvePlan();
+          return; // consume the turn — main agent doesn't process this
+        }
+        if (trimmed === "reject" || trimmed.startsWith("reject")) {
+          orchestrator.rejectPlan();
+          return;
+        }
+        // If user said something else during approval, let it fall through to main agent
+        // (they may be asking a question about the plan)
+      }
+
       const turnCtx: TurnContext = { userMessage };
 
       // Try LLM classification for noPlanIntent + implementIntent.
