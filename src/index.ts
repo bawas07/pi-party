@@ -28,7 +28,7 @@ import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./o
 import { Ledger } from "./ledger.js";
 import { Orchestrator } from "./orchestrator.js";
 import { checkPlanningGate } from "./planning-gate.js";
-import { classifyWithLLM, evaluateAll, type TurnContext } from "./trigger.js";
+import { evaluateAll, type TurnContext } from "./trigger.js";
 
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
@@ -488,32 +488,8 @@ export default function (pi: ExtensionAPI) {
 
       const turnCtx: TurnContext = { userMessage };
 
-      // Try LLM classification for noPlanIntent + implementIntent.
-      // Falls back to regex if model info is unavailable or the call fails.
-      let result: TriggerResult;
-      try {
-        const model = ctx.model ?? ctx.modelRegistry?.find?.("haiku" as any);
-        if (model && (model as any).provider) {
-          const provider = (model as any).provider;
-          const apiKey = await (ctx.modelRegistry as any).getApiKeyAndHeaders?.(model).then(
-            (r: any) => r?.apiKey ?? "",
-          ).catch(() => "");
-          if (apiKey) {
-            result = await classifyWithLLM(turnCtx, {
-              provider: typeof provider === "string" ? provider : provider?.id ?? provider,
-              apiKey,
-              modelId: (model as any).id ?? undefined,
-              baseUrl: (model as any).baseUrl ?? undefined,
-            });
-          } else {
-            result = evaluateAll(turnCtx);
-          }
-        } else {
-          result = evaluateAll(turnCtx);
-        }
-      } catch {
-        result = evaluateAll(turnCtx);
-      }
+      // Regex-only classification — fast, deterministic, no API key needed.
+      const result = evaluateAll(turnCtx);
 
       // Route: noPlanIntent → set flag
       if (result.noPlanIntent) {
