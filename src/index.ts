@@ -530,6 +530,17 @@ export default function (pi: ExtensionAPI) {
           needsScout: result.needsScout,
           cwd: ctx.cwd,
         });
+
+        // Tell the main agent a pipeline is running — it should delegate, not implement directly
+        pi.sendMessage({
+          customType: "text",
+          content: `Pipeline auto-started for: "${userMessage.slice(0, 80)}${userMessage.length > 80 ? "..." : ""}"
+
+Scout is exploring the codebase, then Plan will create an implementation plan. You'll be asked to approve it before any code is written.
+
+**Do not implement this yourself.** Wait for the plan, then reply **approve** or **reject**. Use /summoner to skip the pipeline.`,
+          display: true,
+        } as any);
       }
 
       // Route: implementIntent medium → surface question
