@@ -20,16 +20,13 @@ import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTu
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
+import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
-import { type ModelEntry, type ModelRegistry, resolveModel, selectModel } from "./model-resolver.js";
-import { describePartyRulesSources, loadPartyRules, partyRulesExists, partyRulesPath, savePartyRules, type PartyRules } from "./party-rules.js";
+import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { Ledger } from "./ledger.js";
-import { Orchestrator } from "./orchestrator.js";
-import { checkPlanningGate } from "./planning-gate.js";
-import { classifyWithLLM, evaluateAll, type TurnContext } from "./trigger.js";
-
+import { SubagentScheduler } from "./schedule.js";
+import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
@@ -49,6 +46,7 @@ import {
   type UICtx,
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
+import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
 // ---- Shared helpers ----
@@ -439,139 +437,37 @@ export default function (pi: ExtensionAPI) {
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
 
-  // Capture ctx from session_start for RPC spawn handler.
+  // ---- Subagent scheduler ----
+  // Session-scoped: store is constructed inside session_start once sessionId
+  // is available. Mirrors pi-chonky-tasks's session-scoped task store —
+  // schedules reset on /new, restore on /resume.
+  const scheduler = new SubagentScheduler();
+
+  function startScheduler(ctx: ExtensionContext) {
+    try {
+      const sessionId = ctx.sessionManager?.getSessionId?.();
+      if (!sessionId) return;  // sessionId not yet available — try again on next event
+      const path = resolveStorePath(ctx.cwd, sessionId);
+      const store = new ScheduleStore(path);
+      scheduler.start(pi, ctx, manager, store);
+      pi.events.emit("subagents:scheduler_ready", { sessionId, jobCount: store.list().length });
+    } catch (err) {
+      // Scheduling is non-essential — log and move on so the rest of the
+      // extension keeps working if e.g. .pi/ is unwritable.
+      console.warn("[pi-subagents] Failed to start scheduler:", err);
+    }
+  }
+
+  // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
     manager.clearCompleted(true);
+    if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
   });
 
   pi.on("session_before_switch", () => {
     manager.clearCompleted(true);
-    noPlanIntentFlag = false;  // clear stale flag on session switch
-  });
-
-  // ---- Ambient trigger hook: runs every turn ----
-  pi.on("turn_start", async (_event, ctx) => {
-    try {
-      // Extract user message from session entries (most recent user message)
-      const entries = ctx.sessionManager.getEntries();
-      let userMessage = "";
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const e = entries[i] as any;
-        if (e?.type === "message" && e?.message?.role === "user") {
-          const content = e.message.content;
-          if (Array.isArray(content)) {
-            userMessage = content.map((b: any) => b.text ?? "").join("");
-          } else if (typeof content === "string") {
-            userMessage = content;
-          }
-          break;
-        }
-      }
-
-      if (!userMessage) return;  // skip if no user message found
-
-      // ---- Pipeline approval gate: intercept approve/reject during awaiting-approval ----
-      if (orchestrator.isAwaitingApproval()) {
-        const trimmed = userMessage.trim().toLowerCase();
-        if (trimmed === "approve" || trimmed.startsWith("approve")) {
-          orchestrator.approvePlan();
-          return; // consume the turn — main agent doesn't process this
-        }
-        if (trimmed === "reject" || trimmed.startsWith("reject")) {
-          orchestrator.rejectPlan();
-          return;
-        }
-        // If user said something else during approval, let it fall through to main agent
-        // (they may be asking a question about the plan)
-      }
-
-      const turnCtx: TurnContext = { userMessage };
-
-      // Try LLM classification using the user's configured fast model.
-      // Falls back to regex if no fast model is configured or API key is missing.
-      let result: TriggerResult;
-      try {
-        const rules = loadPartyRules();
-        const fastModelId = rules.fast; // "provider/modelId" from party.rules.json
-        let model: any = undefined;
-
-        if (fastModelId) {
-          const slashIdx = fastModelId.indexOf("/");
-          if (slashIdx !== -1) {
-            const provider = fastModelId.slice(0, slashIdx);
-            const modelId = fastModelId.slice(slashIdx + 1);
-            model = (ctx.modelRegistry as any)?.find?.(provider, modelId);
-          }
-        }
-
-        if (model?.provider) {
-          const provider = model.provider;
-          const apiKey = await (ctx.modelRegistry as any).getApiKeyAndHeaders?.(model).then(
-            (r: any) => r?.apiKey ?? "",
-          ).catch(() => "");
-          if (apiKey) {
-            result = await classifyWithLLM(turnCtx, {
-              provider: typeof provider === "string" ? provider : provider?.id ?? provider,
-              apiKey,
-              modelId: model.id ?? undefined,
-              baseUrl: model.baseUrl ?? undefined,
-            });
-          } else {
-            result = evaluateAll(turnCtx);
-          }
-        } else {
-          result = evaluateAll(turnCtx);
-        }
-      } catch {
-        result = evaluateAll(turnCtx);
-      }
-
-      // Route: noPlanIntent → set flag
-      if (result.noPlanIntent) {
-        noPlanIntentFlag = true;
-      }
-
-      // Route: implementIntent high + pipeline enabled → start pipeline
-      if (result.implementIntent === "high" && isPipelineEnabled() && !orchestrator.isActive()) {
-        const slug = userMessage.slice(0, 60).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+$/, "");
-        orchestrator.startPipeline({
-          task: userMessage,
-          title: slug,
-          content: userMessage,
-          needsScout: result.needsScout,
-          cwd: ctx.cwd,
-        });
-
-        // Tell the main agent a pipeline is running — it should delegate, not implement directly
-        pi.sendMessage({
-          customType: "text",
-          content: `Pipeline auto-started for: "${userMessage.slice(0, 80)}${userMessage.length > 80 ? "..." : ""}"
-
-Scout is exploring the codebase, then Plan will create an implementation plan. You'll be asked to approve it before any code is written.
-
-**Do not implement this yourself.** Wait for the plan, then reply **approve** or **reject**. Use /summoner to skip the pipeline.`,
-          display: true,
-        } as any);
-      }
-
-      // Route: implementIntent medium → surface question
-      if (result.implementIntent === "medium") {
-        pi.sendMessage({
-          customType: "text",
-          content: `I notice you might be planning an implementation. Want me to put together a plan for that? (Reply "yes" or use /summoner to start)`,
-          display: true,
-        } as any);
-      }
-
-      // Route: needsScout → Scout dispatch is now prompt-guided (original approach).
-      // The main agent's system prompt instructs it to use Scout proactively
-      // for codebase exploration. The trigger hook only handles pipeline routing.
-      // needsScout result is still passed to orchestrator for pipeline Scout-before-Plan decisions.
-    } catch (_err) {
-      // Trigger hook failure is non-fatal — log and continue
-      console.warn("[pi-party] Trigger hook evaluation failed:", _err);
-    }
+    scheduler.stop();
   });
 
   const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc, unsubStop: unsubStopRpc } = registerRpcHandlers({
@@ -592,7 +488,7 @@ Scout is exploring the codebase, then Plan will create an implementation plan. Y
     unsubPingRpc();
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
-    orchestrator.dispose();
+    scheduler.stop();
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
@@ -609,31 +505,31 @@ Scout is exploring the codebase, then Plan will create an implementation plan. Y
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
 
-  // ---- Pipeline orchestrator ----
-  const ledger = new Ledger();
-  const orchestrator = new Orchestrator({
-    pi,
-    manager,
-    ledger,
-    widget,
-    fleet,
-    getCtx: () => currentCtx,
-  });
-
-  // Master switch for pipeline auto-trigger (ambient hook). Default: on.
-  // When off, /summoner and /pipeline still work — only ambient auto-start is suppressed.
-  let pipelineEnabled = true;
-  function isPipelineEnabled(): boolean { return pipelineEnabled; }
-  function setPipelineEnabled(b: boolean): void { pipelineEnabled = b; }
-
-  // One-shot flag set by trigger hook when user says "no plan needed".
-  // Consumed by the planning gate on first write-capable spawn, then cleared.
-  let noPlanIntentFlag = false;
-
   // ---- Join mode configuration ----
   let defaultJoinMode: JoinMode = 'smart';
   function getDefaultJoinMode(): JoinMode { return defaultJoinMode; }
   function setDefaultJoinMode(mode: JoinMode) { defaultJoinMode = mode; }
+
+  // Master switch for the schedule subagent feature. Defaults to enabled.
+  // Read once at extension init (before tool registration) so the Agent tool's
+  // param schema reflects the persisted setting. Runtime toggles via /agents
+  // → Settings short-circuit the menu entry + the execute-time addJob path
+  // immediately, but the schema-level removal only takes effect on next
+  // extension load (next pi session). Documented in CHANGELOG/README.
+  let schedulingEnabled = true;
+  function isSchedulingEnabled(): boolean { return schedulingEnabled; }
+  function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
+
+  // ---- Scope models configuration ----
+  // When enabled, subagent model choices are validated against `enabledModels`
+  // from pi's settings — both global `<agentDir>/settings.json` and
+  // project-local `<cwd>/.pi/settings.json` (project overrides global).
+  // Off by default; opt-in via `/agents → Settings`. See docstring on
+  // SubagentsSettings.scopeModels for the hard-error vs warn-and-proceed
+  // policy and its rationale.
+  let scopeModelsEnabled = false;
+  function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
+  function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
 
   // ---- Disable default agents configuration ----
   // When enabled, the three hardcoded default agents (general-purpose, Explore,
@@ -757,6 +653,8 @@ Scout is exploring the codebase, then Plan will create an implementation plan. Y
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,
+      setSchedulingEnabled,
+      setScopeModels: setScopeModelsEnabled,
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: setFleetViewEnabled,
@@ -766,6 +664,31 @@ Scout is exploring the codebase, then Plan will create an implementation plan. Y
 
   // ---- Agent tool ----
 
+  // Schedule param + its guideline are gated on `schedulingEnabled` (read once
+  // at registration; flipping the setting later requires next pi session for
+  // the schema to update). Defining the shape once and spreading it via Partial
+  // preserves Type.Object's inference when present and produces a
+  // `schedule`-free schema when absent — zero LLM-context cost in disabled mode.
+  const scheduleParamShape = {
+    schedule: Type.Optional(
+      Type.String({
+        description:
+          'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
+          'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
+          'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
+      }),
+    ),
+  };
+  const scheduleParam: Partial<typeof scheduleParamShape> =
+    isSchedulingEnabled() ? scheduleParamShape : {};
+
+  const scheduleGuideline = isSchedulingEnabled()
+    ? `\n- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`
+    : "";
+
+  // Compact Agent tool description (#91, `toolDescriptionMode: "compact"`) —
+  // the same load-bearing facts as the full version at ~75% fewer tokens, for
+  // small/local models. Per-option details live in the param descriptions.
   const compactAgentToolDescription = `Launch an autonomous agent for complex, multi-step tasks. Agent types:
 ${buildCompactTypeListText()}
 
@@ -806,7 +729,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.
+- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
 
 ## Writing the prompt
 
@@ -830,6 +753,7 @@ Terse command-style prompts produce shallow, generic work.
       typeList: buildTypeListText,
       compactTypeList: buildCompactTypeListText,
       agentDir: getAgentDir,
+      scheduleGuideline: () => scheduleGuideline,
     };
     // Replacement callback (not a string) — agent descriptions may contain `$&` etc.
     return template.replace(/\{\{(\w+)\}\}/g, (raw, name: string) => {
@@ -930,7 +854,9 @@ Terse command-style prompts produce shallow, generic work.
           description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
         }),
       ),
+      ...scheduleParam,
     }),
+
     // ---- Custom rendering: Claude Code style ----
 
     renderCall(args, theme) {
@@ -1052,18 +978,36 @@ Terse command-style prompts produce shallow, generic work.
         } else {
           model = resolved;
         }
-      } else if (customConfig?.modelPreference) {
-        // Dynamic model selection via party.rules.json
-        const rules = loadPartyRules();
-        try {
-          model = selectModel(customConfig.modelPreference, ctx.modelRegistry, ctx.model, rules);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[pi-party] ${msg}`);
-          // Fall back to parent model — user should run /party-rules to configure
-        }
       }
 
+      // Scope validation: the effective resolved model is checked against the
+      // user's enabledModels list (read in `enabled-models.ts`).
+      //
+      // Design: scopeModels guards against *runtime* LLM choices, not user-level config.
+      //   - Caller-supplied out-of-scope → hard error (the orchestrator made an explicit
+      //     out-of-scope choice; surface it so it picks differently).
+      //   - Frontmatter-pinned or parent-inherited out-of-scope → warn but proceed (the
+      //     user authored/installed this agent or chose the parent's model; trust it).
+      // See SubagentsSettings.scopeModels docstring for the full policy.
+      if (isScopeModelsEnabled() && model) {
+        const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
+        if (allowed && !isModelInScope(model, allowed)) {
+          if (resolvedConfig.modelFromParams) {
+            const list = [...allowed].sort().map(m => `  ${m}`).join("\n");
+            return textResult(
+              `Model not in scope: "${resolvedConfig.modelInput}".\n\n` +
+              `Allowed models (from enabledModels):\n${list}`,
+            );
+          }
+          // Frontmatter-pinned or parent-inherited: warn + proceed.
+          const agentLabel = customConfig?.displayName ?? subagentType;
+          const modelLabel = resolvedConfig.modelInput ?? `${model.provider}/${model.id}`;
+          ctx.ui.notify(
+            `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
+            "warning",
+          );
+        }
+      }
 
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
@@ -1100,6 +1044,47 @@ Terse command-style prompts produce shallow, generic work.
         tags: agentTags.length > 0 ? agentTags : undefined,
       };
 
+      // ---- Schedule: register a job, don't spawn now ----
+      if (params.schedule) {
+        if (!isSchedulingEnabled()) {
+          return textResult("Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.");
+        }
+        if (params.resume) {
+          return textResult("Cannot combine `schedule` with `resume` — schedules create fresh agents.");
+        }
+        if (params.inherit_context) {
+          return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
+        }
+        if (params.run_in_background === false) {
+          return textResult("Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.");
+        }
+        if (!scheduler.isActive()) {
+          return textResult("Scheduler is not active in this session yet. Try again after the session has fully started.");
+        }
+        try {
+          const job = scheduler.addJob({
+            name: params.description as string,
+            description: params.description as string,
+            schedule: params.schedule as string,
+            subagent_type: subagentType,
+            prompt: params.prompt as string,
+            model: params.model as string | undefined,
+            thinking: thinking,
+            max_turns: effectiveMaxTurns,
+            isolated: isolated,
+            isolation: isolation,
+          });
+          const next = scheduler.getNextRun(job.id);
+          return textResult(
+            `Scheduled "${job.name}" (id: ${job.id}, type: ${job.scheduleType}). ` +
+            `Next run: ${next ?? "(unknown)"}. ` +
+            `Manage via /agents → Scheduled jobs.`,
+          );
+        } catch (err) {
+          return textResult(err instanceof Error ? err.message : String(err));
+        }
+      }
+
       // Resume existing agent
       if (params.resume) {
         const existing = manager.getRecord(params.resume);
@@ -1117,24 +1102,6 @@ Terse command-style prompts produce shallow, generic work.
           record.result?.trim() || record.error?.trim() || "No output.",
           buildDetails(detailBase, record),
         );
-      }
-
-      // ---- Planning gate: block write-capable spawns without approved plan ----
-      // Only enforced when a pipeline is active. Outside pipeline mode, the Agent
-      // tool works as before without plan requirements.
-      if (!params.resume && orchestrator.isActive()) {
-        const gateResult = checkPlanningGate({
-          subagentType,
-          hasApprovedPlan: orchestrator.hasApprovedPlan(),
-          noPlanIntent: noPlanIntentFlag,
-        });
-
-        // Clear one-shot flag after consumption
-        if (noPlanIntentFlag) noPlanIntentFlag = false;
-
-        if (!gateResult.allowed) {
-          return textResult(gateResult.message ?? "Planning gate blocked this agent spawn.");
-        }
       }
 
       // Background execution
@@ -1521,6 +1488,12 @@ Terse command-style prompts produce shallow, generic work.
       options.push(`Agent types (${allNames.length})`);
     }
 
+    // Scheduled jobs entry (always present when scheduler is active)
+    if (scheduler.isActive()) {
+      const jobCount = scheduler.list().length;
+      options.push(`Scheduled jobs (${jobCount})`);
+    }
+
     // Actions
     options.push("Create new agent");
     options.push("Settings");
@@ -1543,6 +1516,9 @@ Terse command-style prompts produce shallow, generic work.
       await showAgentsMenu(ctx);
     } else if (choice.startsWith("Agent types (")) {
       await showAllAgentsList(ctx);
+      await showAgentsMenu(ctx);
+    } else if (choice.startsWith("Scheduled jobs (")) {
+      await showSchedulesMenu(ctx, scheduler);
       await showAgentsMenu(ctx);
     } else if (choice === "Create new agent") {
       await showCreateWizard(ctx);
@@ -2012,6 +1988,8 @@ ${systemPrompt}
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
       graceTurns: getGraceTurns(),
       defaultJoinMode: getDefaultJoinMode(),
+      schedulingEnabled: isSchedulingEnabled(),
+      scopeModels: isScopeModelsEnabled(),
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
       fleetView: isFleetViewEnabled(),
@@ -2054,6 +2032,20 @@ ${systemPrompt}
           description: "Default join mode for background agents",
           currentValue: getDefaultJoinMode(),
           values: ["smart", "async", "group"],
+        },
+        {
+          id: "schedulingEnabled",
+          label: "Scheduling",
+          description: "Schedule subagent feature (off removes `schedule` param from Agent tool spec on next pi session)",
+          currentValue: isSchedulingEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "scopeModels",
+          label: "Scope models",
+          description: "Validate subagent models against scoped models (/scoped-models)",
+          currentValue: isScopeModelsEnabled() ? "on" : "off",
+          values: ["on", "off"],
         },
         {
           id: "disableDefaultAgents",
@@ -2104,6 +2096,22 @@ ${systemPrompt}
       } else if (id === "joinMode") {
         setDefaultJoinMode(value as JoinMode);
         notifyApplied(ctx, `Default join mode set to ${value}`);
+      } else if (id === "schedulingEnabled") {
+        const enabled = value === "on";
+        if (enabled === isSchedulingEnabled()) {
+          ctx.ui.notify(`Scheduling already ${enabled ? "enabled" : "disabled"}.`, "info");
+        } else {
+          setSchedulingEnabled(enabled);
+          if (!enabled) scheduler.stop();  // immediate kill — outstanding fires stop ticking
+          notifyApplied(
+            ctx,
+            `Scheduling ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
+          );
+        }
+      } else if (id === "scopeModels") {
+        const enabled = value === "on";
+        setScopeModelsEnabled(enabled);
+        notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "disableDefaultAgents") {
         const enabled = value === "on";
         setDisableDefaultAgents(enabled);
@@ -2193,133 +2201,6 @@ ${systemPrompt}
     }
   }
 
-  // ---- /party-rules wizard ----
-  async function showPartyRulesWizard(ctx: ExtensionCommandContext) {
-    // Build available model list from registry
-    const registry = ctx.modelRegistry as ModelRegistry | undefined;
-    const rawModels = (registry?.getAvailable?.() ?? registry?.getAll?.() ?? []) as ModelEntry[];
-    const modelLabels = rawModels.map(m => `${m.provider}/${m.id} — ${m.name}`);
-
-    if (modelLabels.length === 0) {
-      ctx.ui.notify("No models available in the registry. Configure at least one model with valid credentials first.", "error");
-      return;
-    }
-
-    // Build a lookup: label → "provider/modelId"
-    const labelToId = new Map<string, string>();
-    for (const m of rawModels) {
-      labelToId.set(`${m.provider}/${m.id} — ${m.name}`, `${m.provider}/${m.id}`);
-    }
-
-    // Show current state
-    const currentRules = loadPartyRules(ctx.cwd);
-    const sources = describePartyRulesSources(ctx.cwd);
-    const hasAny = currentRules.fast || currentRules.general || currentRules.thinking;
-
-    if (hasAny) {
-      const currentInfo = [
-        `Current party rules:`,
-        currentRules.fast ? `  fast:     ${currentRules.fast}` : null,
-        currentRules.general ? `  general:  ${currentRules.general}` : null,
-        currentRules.thinking ? `  thinking: ${currentRules.thinking}` : null,
-        `  (${sources})`,
-      ].filter(Boolean).join("\n");
-      ctx.ui.notify(currentInfo, "info");
-    } else {
-      ctx.ui.notify(sources, "info");
-    }
-
-    /**
-     * Present a model picker with the current value marked and a skip option.
-     * Returns:
-     *   - "provider/modelId" string when user picks a model
-     *   - null when user chooses "Skip" (explicit skip, keep whatever was there)
-     *   - undefined when user presses Esc (cancel the whole wizard)
-     */
-    async function pickModel(
-      label: string,
-      currentValue?: string,
-    ): Promise<string | null | undefined> {
-      const options: string[] = [];
-
-      for (const ml of modelLabels) {
-        const id = labelToId.get(ml)!;
-        options.push(id === currentValue ? `✓ ${ml} (current)` : `  ${ml}`);
-      }
-
-      options.push(currentValue ? "— Keep current (skip)" : "— Skip");
-
-      const choice = await ctx.ui.select(label, options);
-      if (!choice) return undefined; // Esc → cancel wizard
-      if (choice.startsWith("—")) return null; // explicit skip
-
-      const clean = choice.replace(/^[✓ ]+\s*/, "");
-      return labelToId.get(clean);
-    }
-
-    // Step 1: Pick fast model
-    const fastResult = await pickModel("Model for fast agents (Scout, etc.):", currentRules.fast);
-    if (fastResult === undefined) return; // Esc
-    const fastModel = fastResult ?? currentRules.fast; // null → keep current
-
-    // Step 2: Pick general model
-    const generalResult = await pickModel("Model for general agents:", currentRules.general);
-    if (generalResult === undefined) return;
-    const generalModel = generalResult ?? currentRules.general;
-
-    // Step 3: Pick thinking model
-    const thinkingResult = await pickModel("Model for thinking agents (Plan, Gatekeeper):", currentRules.thinking);
-    if (thinkingResult === undefined) return;
-    const thinkingModel = thinkingResult ?? currentRules.thinking;
-
-    // Build rules from selections
-    const rules: PartyRules = {};
-    if (fastModel?.includes("/")) rules.fast = fastModel;
-    if (generalModel?.includes("/")) rules.general = generalModel;
-    if (thinkingModel?.includes("/")) rules.thinking = thinkingModel;
-
-    if (!rules.fast && !rules.general && !rules.thinking) {
-      ctx.ui.notify("No models configured. Party rules unchanged.", "warning");
-      return;
-    }
-
-    // Step 4: Ask where to save
-    const scopeChoice = await ctx.ui.select("Where to save party rules?", [
-      "Local (.pi/party.rules.json) — this project only",
-      "Global (~/.pi/agent/party.rules.json) — all projects",
-    ]);
-    if (!scopeChoice) return;
-
-    const scope = scopeChoice.startsWith("Local") ? "local" as const : "global" as const;
-    const targetPath = partyRulesPath(scope, ctx.cwd);
-
-    // Step 5: If file exists, confirm override
-    if (partyRulesExists(scope, ctx.cwd)) {
-      const confirm = await ctx.ui.select(
-        `party.rules.json already exists at ${targetPath}. Override?`,
-        ["Yes, override", "No, cancel"],
-      );
-      if (!confirm || confirm.startsWith("No")) {
-        ctx.ui.notify("Party rules unchanged.", "info");
-        return;
-      }
-    }
-
-    // Save
-    const ok = savePartyRules(rules, scope, ctx.cwd);
-    if (ok) {
-      const summary = [
-        `Party rules saved to ${scope} (${targetPath}):`,
-        rules.fast ? `  fast:     ${rules.fast}` : null,
-        rules.general ? `  general:  ${rules.general}` : null,
-        rules.thinking ? `  thinking: ${rules.thinking}` : null,
-      ].filter(Boolean).join("\n");
-      ctx.ui.notify(summary, "info");
-    } else {
-      ctx.ui.notify(`Failed to save party rules to ${targetPath}.`, "error");
-    }
-  }
-
   // Persist the current snapshot, emit `subagents:settings_changed`, and surface
   // the right toast. Successful saves show info; persistence failures downgrade
   // to warning so users aren't silently reverted on restart. Event fires regardless
@@ -2336,35 +2217,5 @@ ${systemPrompt}
   pi.registerCommand("agents", {
     description: "Manage agents",
     handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
-  });
-
-  // ---- /summoner: manual pipeline override ----
-  const summonerHandler = async (args: string, ctx: ExtensionCommandContext) => {
-    const task = args.trim();
-    if (!task) {
-      const input = await ctx.ui.input("What should I build?");
-      if (!input) return;
-      const slug = input.slice(0, 60).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+$/, "");
-      orchestrator.startPipeline({ task: input, title: slug, content: input, needsScout: true, cwd: ctx.cwd });
-      return;
-    }
-    const slug = task.slice(0, 60).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+$/, "");
-    orchestrator.startPipeline({ task, title: slug, content: task, needsScout: true, cwd: ctx.cwd });
-  };
-
-  pi.registerCommand("summoner", {
-    description: "Start the implementation pipeline for a task",
-    handler: async (args, ctx) => { await summonerHandler(args, ctx); },
-  });
-
-  pi.registerCommand("pipeline", {
-    description: "Alias for /summoner — start the implementation pipeline",
-    handler: async (args, ctx) => { await summonerHandler(args, ctx); },
-  });
-
-  // ---- /party-rules: interactive party.rules.json config generator ----
-  pi.registerCommand("party-rules", {
-    description: "Configure model assignments for agent types (fast, general, thinking)",
-    handler: async (_args, ctx) => { await showPartyRulesWizard(ctx); },
   });
 }

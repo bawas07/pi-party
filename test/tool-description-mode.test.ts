@@ -100,7 +100,7 @@ describe("toolDescriptionMode", () => {
     expect(desc).not.toContain("## Writing the prompt");
     // Type list keeps every agent but only the first sentence of each description.
     expect(desc).toContain("- general-purpose:");
-    expect(desc).toContain("- Scout:");
+    expect(desc).toContain("- Explore: Fast read-only search agent for locating code. (Tools:");
     expect(desc).not.toContain("very thorough");
     // The point of the feature: materially smaller than the full version.
     expect(desc.length).toBeLessThan(1600);
@@ -151,14 +151,32 @@ describe("toolDescriptionMode", () => {
     });
     const desc: string = tools.get("Agent").description;
     expect(desc).toContain("GLOBAL CUSTOM");
-    expect(desc).toContain("- Scout:");
+    expect(desc).toContain("- Explore: Fast read-only search agent for locating code. (Tools:");
+  });
+
+  it("{{scheduleGuideline}} expands to the schedule bullet when scheduling is on (default)", () => {
+    const tools = setup({ toolDescriptionMode: "custom" }, () => {
+      writeFileSync(join(tmpDir, ".pi", "agent-tool-description.md"), "RULES:{{scheduleGuideline}}\nEND");
+    });
+    const desc: string = tools.get("Agent").description;
+    // The expansion carries its own leading "\n- " bullet.
+    expect(desc).toContain("RULES:\n- Use `schedule` only when");
+  });
+
+  it("{{scheduleGuideline}} expands to the empty string when scheduling is disabled", () => {
+    const tools = setup({ toolDescriptionMode: "custom", schedulingEnabled: false }, () => {
+      writeFileSync(join(tmpDir, ".pi", "agent-tool-description.md"), "RULES:{{scheduleGuideline}}\nEND");
+    });
+    const desc: string = tools.get("Agent").description;
+    expect(desc).toContain("RULES:\nEND");
+    expect(desc).not.toContain("schedule");
   });
 
   it("every documented placeholder is replaced — no {{ }} residue", () => {
     const tools = setup({ toolDescriptionMode: "custom" }, () => {
       writeFileSync(
         join(tmpDir, ".pi", "agent-tool-description.md"),
-        "A {{typeList}} B {{compactTypeList}} C {{agentDir}} E",
+        "A {{typeList}} B {{compactTypeList}} C {{agentDir}} D {{scheduleGuideline}} E",
       );
     });
     const desc: string = tools.get("Agent").description;

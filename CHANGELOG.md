@@ -7,24 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- **Pipeline orchestration (`pi-party`)** — Scout → Plan → Crafter → Gatekeeper pipeline for implementation tasks.
-  - `/summoner <task>` and `/pipeline <task>` commands to manually start the pipeline
-  - Ambient trigger hook on every turn: auto-detects implementation intent and optionally starts the pipeline
-  - Planning gate: write-capable agent spawns are blocked without an approved plan
-  - Pipeline progress widget showing per-phase and per-step status
-  - Event-driven orchestrator with concurrent Crafter support and worktree isolation
-  - Gatekeeper fix loop (max 3 rounds) with in-scope/out-of-scope classification
-- **Milestone 8: Tests + cleanup** — comprehensive test coverage for pipeline modules, integration tests for concurrent Crafters and side-question non-blocking, agent widget rendering tests, worktree concurrent-isolation tests, README/CHANGELOG/package.json identity cleanup from `@tintinweb/pi-subagents` to `pi-party`
-
-### Changed
-- Agent lineup updated: `Explore` replaced by `Scout`; old `Plan` replaced by pipeline-aware Plan; `Crafter` and `Gatekeeper` added
-- `DEFAULT_AGENT_NAMES` updated to `["general-purpose", "Scout", "Plan", "Crafter", "Gatekeeper"]`
-
-### Removed
-- **Scheduling feature** — `schedule.ts`, `schedule-store.ts`, `schedule-menu.ts` deleted. `Agent` tool no longer accepts `schedule` param.
-- **Model scope enforcement** — `enabled-models.ts` deleted. `Agent` tool no longer validates models against an allowed-models list.
-
 ## [0.12.0] - 2026-06-24
 
 ### Added

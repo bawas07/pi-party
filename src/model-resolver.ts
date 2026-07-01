@@ -1,6 +1,5 @@
 /**
  * Model resolution: exact match ("provider/modelId") with fuzzy fallback.
- * Also provides dynamic model selection by role preference.
  */
 
 export interface ModelEntry {
@@ -79,66 +78,4 @@ export function resolveModel(
     .sort()
     .join("\n");
   return `Model not found: "${input}".\n\nAvailable models:\n${modelList}`;
-}
-
-/**
- * Party rules for model assignment. Keys map to ModelPreference values.
- * Loaded from party.rules.json (global and/or local).
- */
-export interface PartyRulesConfig {
-  fast?: string;
-  general?: string;
-  thinking?: string;
-}
-
-/**
- * Select a model by role preference. Config-driven — requires party.rules.json.
- *
- * @param preference - "fast" | "general" | "thinking" | "inherit"
- * @param registry - Model registry to query
- * @param parentModel - Parent session's model (required for "inherit")
- * @param rules - Party rules from party.rules.json (required for non-inherit)
- */
-export function selectModel(
-  preference: "fast" | "general" | "thinking" | "inherit",
-  registry: ModelRegistry,
-  parentModel?: any,
-  rules?: PartyRulesConfig,
-): any {
-  const available = (registry.getAvailable?.() ?? registry.getAll()) as ModelEntry[];
-
-  if (available.length === 0) {
-    throw new Error(`selectModel: no models available for preference "${preference}". Ensure at least one model is configured with valid credentials.`);
-  }
-
-  // 1. "inherit" — return parent model, fall back to configured thinking
-  if (preference === "inherit") {
-    if (parentModel) {
-      const parentId = typeof parentModel === "string" ? parentModel : `${parentModel.provider}/${parentModel.id}`;
-      const availableSet = new Set(available.map(m => `${m.provider}/${m.id}`));
-      if (availableSet.has(parentId)) return parentModel;
-      console.warn(`[pi-party] Parent model "${parentId}" not in available registry, falling back to thinking preference.`);
-    }
-    return selectModel("thinking", registry, undefined, rules);
-  }
-
-  // 2. Config-driven — party.rules.json
-  const configKey = preference as string; // "fast", "general", or "thinking"
-  const configuredModel = rules?.[configKey as keyof PartyRulesConfig];
-  if (configuredModel) {
-    const slashIdx = configuredModel.indexOf("/");
-    if (slashIdx !== -1) {
-      const provider = configuredModel.slice(0, slashIdx);
-      const modelId = configuredModel.slice(slashIdx + 1);
-      const found = registry.find(provider, modelId);
-      if (found) return found;
-      console.warn(`[pi-party] Configured ${configKey} model "${configuredModel}" not in available registry.`);
-    }
-  }
-
-  // 3. No config — error with guidance
-  throw new Error(
-    `No model configured for "${preference}" preference. ` +
-    `Create a party.rules.json with a "${configKey}" entry, or run /party-rules to set one up interactively.`,
-  );
 }

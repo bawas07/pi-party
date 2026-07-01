@@ -11,11 +11,8 @@ export type { ThinkingLevel };
 /** Agent type: any string name (built-in defaults or user-defined). */
 export type SubagentType = string;
 
-/** Model preference for dynamic model selection at spawn time. */
-export type ModelPreference = "fast" | "general" | "thinking" | "inherit";
-
 /** Names of the three embedded default agents. */
-export const DEFAULT_AGENT_NAMES = ["general-purpose", "Scout", "Plan", "Crafter", "Gatekeeper"] as const;
+export const DEFAULT_AGENT_NAMES = ["general-purpose", "Explore", "Plan"] as const;
 
 /** Memory scope for persistent agent memory. */
 export type MemoryScope = "user" | "project" | "local";
@@ -42,9 +39,6 @@ export interface AgentConfig {
   /** true = inherit all, string[] = only listed, false = none */
   skills: true | string[] | false;
   model?: string;
-  /** Model preference for dynamic selection at spawn time ("fast", "general", "thinking", "inherit").
-   * When set, overrides the static `model` field. Resolved by selectModel() at spawn. */
-  modelPreference?: ModelPreference;
   thinking?: ThinkingLevel;
   maxTurns?: number;
   /** Persist this subagent as a normal pi session instead of keeping it in memory only. */
@@ -146,4 +140,47 @@ export interface EnvInfo {
   isGitRepo: boolean;
   branch: string;
   platform: string;
+}
+
+/**
+ * A subagent spawn registered to fire on a schedule.
+ *
+ * Stored at `<cwd>/.pi/subagent-schedules/<sessionId>.json`. Session-scoped:
+ * survives `/resume` but resets on `/new`, mirroring pi-chonky-tasks.
+ */
+export interface ScheduledSubagent {
+  id: string;
+  /** Unique within store. Defaults to `description`. */
+  name: string;
+  description: string;
+  /** Raw user input — cron expr | "+10m" | ISO | "5m". */
+  schedule: string;
+  scheduleType: "cron" | "once" | "interval";
+  /** Computed at create time for interval/once. */
+  intervalMs?: number;
+
+  // spawn params (subset of Agent tool params; no inherit_context, no resume)
+  subagent_type: SubagentType;
+  prompt: string;
+  model?: string;
+  thinking?: ThinkingLevel;
+  max_turns?: number;
+  isolated?: boolean;
+  isolation?: IsolationMode;
+
+  // state
+  enabled: boolean;
+  /** ISO timestamp. */
+  createdAt: string;
+  lastRun?: string;
+  lastStatus?: "success" | "error" | "running";
+  /** Refreshed on every fire and on store load. */
+  nextRun?: string;
+  runCount: number;
+}
+
+export interface ScheduleStoreData {
+  /** For future migrations. */
+  version: 1;
+  jobs: ScheduledSubagent[];
 }

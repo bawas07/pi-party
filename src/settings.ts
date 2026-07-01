@@ -18,6 +18,37 @@ export interface SubagentsSettings {
   graceTurns?: number;
   defaultJoinMode?: JoinMode;
   /**
+   * Master switch for the schedule subagent feature. Defaults to `true`.
+   * When `false`: the `Agent` tool's `schedule` param + its guideline are
+   * stripped from the tool spec at registration (zero LLM-context cost), the
+   * scheduler doesn't bind to the session, and the `/agents → Scheduled jobs`
+   * menu entry is hidden. Schema-level removal applies at extension load
+   * (next pi session); runtime menu/runtime-fire short-circuit is immediate.
+   */
+  schedulingEnabled?: boolean;
+  /**
+   * When true, the effective model of each subagent spawn is validated
+   * against `enabledModels` from pi's settings — both global
+   * (`<agentDir>/settings.json`) and project-local (`<cwd>/.pi/settings.json`),
+   * with project overriding global (mirrors pi's SettingsManager deep-merge).
+   *
+   * scopeModels guards against runtime LLM choices, not user-level config.
+   * Out-of-scope handling reflects this:
+   *   - Caller-supplied via `Agent({ model: "..." })` (only when frontmatter
+   *     has no `model:`, since frontmatter is authoritative): hard error
+   *     returned to the orchestrator, listing the allowed models. The LLM
+   *     made an explicit out-of-scope choice and gets explicit feedback.
+   *   - Frontmatter-pinned: warning toast + the pinned model runs. The
+   *     agent's author/installer chose this; trust it.
+   *   - Parent-inherited (neither caller nor frontmatter sets a model):
+   *     warning toast + parent's model runs. The user chose the parent's
+   *     model when starting the session; trust it.
+   *
+   * No-op when pi's `enabledModels` is empty or absent — nothing to validate
+   * against. Defaults to false: subagents may use any model.
+   */
+  scopeModels?: boolean;
+  /**
    * When true, the three built-in default agents (general-purpose, Explore, Plan)
    * are not registered at startup. User-defined agents from .pi/agents/*.md are
    * completely unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
@@ -51,6 +82,8 @@ export interface SettingsAppliers {
   setDefaultMaxTurns: (n: number) => void;
   setGraceTurns: (n: number) => void;
   setDefaultJoinMode: (mode: JoinMode) => void;
+  setSchedulingEnabled: (b: boolean) => void;
+  setScopeModels: (enabled: boolean) => void;
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
   setFleetView: (b: boolean) => void;
@@ -97,6 +130,12 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.defaultJoinMode === "string" && VALID_JOIN_MODES.has(r.defaultJoinMode)) {
     out.defaultJoinMode = r.defaultJoinMode as JoinMode;
+  }
+  if (typeof r.schedulingEnabled === "boolean") {
+    out.schedulingEnabled = r.schedulingEnabled;
+  }
+  if (typeof r.scopeModels === "boolean") {
+    out.scopeModels = r.scopeModels;
   }
   if (typeof r.disableDefaultAgents === "boolean") {
     out.disableDefaultAgents = r.disableDefaultAgents;
@@ -161,6 +200,8 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
+  if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
+  if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);

@@ -42,7 +42,7 @@ describe("agent type registry", () => {
   describe("default agents", () => {
     it("recognizes all default agent types", () => {
       expect(isValidType("general-purpose")).toBe(true);
-      expect(isValidType("Scout")).toBe(true);
+      expect(isValidType("Explore")).toBe(true);
       expect(isValidType("Plan")).toBe(true);
     });
 
@@ -57,21 +57,21 @@ describe("agent type registry", () => {
     });
 
     it("case-insensitive lookup works for isValidType", () => {
-      expect(isValidType("scout")).toBe(true);
-      expect(isValidType("SCOUT")).toBe(true);
+      expect(isValidType("explore")).toBe(true);
+      expect(isValidType("EXPLORE")).toBe(true);
       expect(isValidType("General-Purpose")).toBe(true);
       expect(isValidType("plan")).toBe(true);
     });
 
     it("case-insensitive lookup works for getAgentConfig", () => {
-      const config = getAgentConfig("scout");
-      expect(config?.name).toBe("Scout");
-      expect(config?.modelPreference).toBe("fast");
+      const config = getAgentConfig("explore");
+      expect(config?.name).toBe("Explore");
+      expect(config?.model).toBe("anthropic/claude-haiku-4-5-20251001");
     });
 
     it("resolveType returns canonical key or undefined", () => {
-      expect(resolveType("Scout")).toBe("Scout");
-      expect(resolveType("scout")).toBe("Scout");
+      expect(resolveType("Explore")).toBe("Explore");
+      expect(resolveType("explore")).toBe("Explore");
       expect(resolveType("GENERAL-PURPOSE")).toBe("general-purpose");
       expect(resolveType("nonexistent")).toBeUndefined();
     });
@@ -85,12 +85,16 @@ describe("agent type registry", () => {
     });
 
     it("Explore has read-only tools", () => {
-      const config = getConfig("Scout");
+      const config = getConfig("Explore");
       expect(config.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
       expect(config.builtinToolNames).not.toContain("edit");
       expect(config.builtinToolNames).not.toContain("write");
     });
 
+    it("Explore has haiku model in config", () => {
+      const cfg = getAgentConfig("Explore");
+      expect(cfg?.model).toBe("anthropic/claude-haiku-4-5-20251001");
+    });
 
     it("default agents are marked isDefault", () => {
       const cfg = getAgentConfig("general-purpose");
@@ -101,7 +105,7 @@ describe("agent type registry", () => {
     // An explicit `false` here would silently win over the caller's `true` via `??` in
     // resolveAgentInvocationConfig, breaking documented Agent tool params.
     it("default agents do not lock strategy fields (run_in_background / inherit_context / isolated)", () => {
-      for (const name of ["general-purpose", "Scout", "Plan"]) {
+      for (const name of ["general-purpose", "Explore", "Plan"]) {
         const cfg = getAgentConfig(name);
         expect(cfg?.runInBackground, `${name}.runInBackground`).toBeUndefined();
         expect(cfg?.inheritContext, `${name}.inheritContext`).toBeUndefined();
@@ -112,7 +116,7 @@ describe("agent type registry", () => {
     it("getDefaultAgentNames returns default agent names", () => {
       const names = getDefaultAgentNames();
       expect(names).toContain("general-purpose");
-      expect(names).toContain("Scout");
+      expect(names).toContain("Explore");
       expect(names).toContain("Plan");
     });
 
@@ -145,7 +149,7 @@ describe("agent type registry", () => {
 
       expect(getAvailableTypes()).toEqual([]);
       expect(isValidType("general-purpose")).toBe(false);
-      expect(isValidType("Scout")).toBe(false);
+      expect(isValidType("Explore")).toBe(false);
       expect(isValidType("Plan")).toBe(false);
     });
 
@@ -166,7 +170,7 @@ describe("agent type registry", () => {
       setDefaultsDisabled(false);
       registerAgents(new Map());
       expect(isValidType("general-purpose")).toBe(true);
-      expect(isValidType("Scout")).toBe(true);
+      expect(isValidType("Explore")).toBe(true);
       expect(isValidType("Plan")).toBe(true);
     });
 
@@ -196,7 +200,7 @@ describe("agent type registry", () => {
 
       const types = getAvailableTypes();
       expect(types).toContain("general-purpose");
-      expect(types).toContain("Scout");
+      expect(types).toContain("Explore");
       expect(types).toContain("auditor");
     });
 
@@ -282,14 +286,14 @@ describe("agent type registry", () => {
     });
 
     it("user agent overrides default with same name", () => {
-      const agents = new Map([["Scout", makeAgentConfig({
-        name: "Scout",
+      const agents = new Map([["Explore", makeAgentConfig({
+        name: "Explore",
         description: "Custom Explore",
         builtinToolNames: BUILTIN_TOOL_NAMES,
       })]]);
       registerAgents(agents);
 
-      const config = getConfig("Scout");
+      const config = getConfig("Explore");
       expect(config.description).toBe("Custom Explore");
       expect(config.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
     });
